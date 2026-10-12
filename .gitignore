@@ -11,6 +11,7 @@ test/*.mkv
 test/*.mp4
 test/*.flv
 test/*.png
+!test/ui_final_idle.png
 test/*.log
 test/Clip*.mkv
 test/Combo*.mkv

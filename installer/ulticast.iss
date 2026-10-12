@@ -83,7 +83,8 @@ begin
   Result := '';
 end;
 
-procedure InitializeUninstall();
+function InitializeUninstall(): Boolean;
 begin
   KillUlticast();
+  Result := True;
 end;

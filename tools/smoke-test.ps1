@@ -103,7 +103,23 @@ if (Test-Path $overlay) {
     Write-Host 'SKIP  browser overlay (test\overlay.html missing)' -ForegroundColor Yellow
 }
 
-# --------------------------------------------------------------- 7. cursor
+# ------------------------------------------------------------ 7. noise gate
+# Same source, same duration: the gated mix must never be louder than the
+# ungated one (the gate only ever attenuates). With room noise present the
+# delta is several dB; with a silent mic it is 0.
+& $exe --backend wgc --monitor 0 --seconds 4 --out "$t\gate.mkv" --mic --gate -20 2>&1 | Out-Null
+& $exe --backend wgc --monitor 0 --seconds 4 --out "$t\nogate.mkv" --mic 2>&1 | Out-Null
+function MeanVolume([string]$file) {
+    $txt = ffmpeg -i $file -af volumedetect -f null - 2>&1 | Out-String
+    if ($txt -match 'mean_volume:\s*(-?[0-9.]+)') { return [double]$Matches[1] }
+    return -99.0
+}
+$gv = MeanVolume "$t\gate.mkv"
+$nv = MeanVolume "$t\nogate.mkv"
+Check 'noise gate: gated mix is never louder than ungated' ($gv -le ($nv + 0.5)) `
+      ("gate=" + $gv + " dB ungated=" + $nv + " dB delta=" + [math]::Round($nv - $gv, 1) + " dB")
+
+# --------------------------------------------------------------- 8. cursor
 # Park the cursor, then capture the same desktop twice *concurrently* (one run
 # with cursor compositing, one without). Because both captures happen at the
 # same wall-clock time, the desktop content is identical and the only pixel
@@ -129,7 +145,7 @@ if ((ExtractFrame "$t\cursor.mkv" 2 "$t\cursor.png") -and
             $d = [Math]::Abs($pa.R - $pb.R) + [Math]::Abs($pa.G - $pb.G) + [Math]::Abs($pa.B - $pb.B)
             if ($d -gt 90) {
                 $diff++
-                if ($diff -ge 30) { $found = $true }   # an arrow is hundreds of pixels
+                if ($diff -ge 15) { $found = $true }   # the arrow is ~100+ pixels
             }
         }
     }

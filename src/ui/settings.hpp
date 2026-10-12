@@ -45,6 +45,8 @@ struct UiSettings {
     std::string desktopDevice;  // UTF-8 substring; empty = default device
     float micGain = 1.0f;
     float desktopGain = 1.0f;
+    bool micGate = false;   // mic noise gate
+    int micGateDb = -45;    // gate threshold in dBFS
 
     bool webcam = false;
     std::string webcamDevice;  // UTF-8 substring; empty = default camera

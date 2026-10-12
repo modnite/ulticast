@@ -7,6 +7,13 @@
 bool AudioMixer::Prepare(const AudioConfig& cfg, int sampleRate, std::string* err) {
     cfg_ = cfg;
     sampleRate_ = sampleRate;
+    gateOn_ = cfg.gate;
+    gateDb_ = cfg.gateDb;
+    gateHoldSamples_ = (int)(0.120f * sampleRate);
+    gateEnv_ = 1.f;
+    gateHold_ = 0;
+    if (cfg.gate)
+        std::printf("[audio] mic noise gate on (%.0f dB)\n", cfg.gateDb);
     if (encMix_) {
         encMix_->Shutdown();
         encMix_.reset();
@@ -126,6 +133,31 @@ void AudioMixer::Pump() {
             Fill(mic_, cfg_.micGain * liveMicGain_.load(), m.data());
         else
             std::fill(m.begin(), m.end(), 0.f);
+
+        // Noise gate on the mic track: attenuate below the threshold so
+        // keyboard/fan noise never reaches the mix. Envelope follower with
+        // ~2 ms attack, ~120 ms hold and ~150 ms release (no lookahead).
+        if (gateOn_.load()) {
+            const float thr = powf(10.f, gateDb_.load() / 20.f);
+            const float atk = 1.f - expf(-1.f / (0.002f * (float)sampleRate_));
+            const float rel = 1.f - expf(-1.f / (0.150f * (float)sampleRate_));
+            for (int i = 0; i < F; ++i) {
+                const float a = (std::max)(fabsf(m[2 * i]), fabsf(m[2 * i + 1]));
+                if (a > thr) {
+                    gateEnv_ += (1.f - gateEnv_) * atk;
+                    gateHold_ = gateHoldSamples_;
+                } else if (gateHold_ > 0) {
+                    --gateHold_;
+                } else {
+                    gateEnv_ += (0.f - gateEnv_) * rel;
+                }
+                m[2 * i] *= gateEnv_;
+                m[2 * i + 1] *= gateEnv_;
+            }
+        } else if (gateEnv_ != 1.f) {
+            gateEnv_ = 1.f;
+            gateHold_ = 0;
+        }
 
         // Diagnostics: how much real audio went in vs media time emitted.
         {

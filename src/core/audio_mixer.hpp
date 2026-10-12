@@ -16,6 +16,8 @@ struct AudioConfig {
     std::wstring micDevice;
     float desktopGain = 1.0f;
     float micGain = 1.0f;
+    bool gate = false;      // mic noise gate
+    float gateDb = -45.f;   // gate threshold (dBFS)
     int bitrateKbps = 160;
     int tracks = 1;  // 1 = mix only, 2 = mix + mic-only track (file output)
 };
@@ -38,6 +40,11 @@ public:
     void SetLiveSources(bool desktop, bool mic) {
         liveDeskGain_.store(desktop ? 1.f : 0.f);
         liveMicGain_.store(mic ? 1.f : 0.f);
+    }
+    // Runtime mic noise gate (threshold in dBFS).
+    void SetGate(bool on, float db) {
+        gateOn_.store(on);
+        gateDb_.store(db);
     }
     void Stop();
 
@@ -62,6 +69,11 @@ private:
     std::thread pump_;
     std::atomic<bool> quit_{false};
     std::atomic<float> liveDeskGain_{1.f}, liveMicGain_{1.f};
+    std::atomic<bool> gateOn_{false};
+    std::atomic<float> gateDb_{-45.f};
+    float gateEnv_ = 1.f;   // current gate gain (smoothed)
+    int gateHold_ = 0;      // samples left in the hold window
+    int gateHoldSamples_ = 5760;  // ~120 ms at 48 kHz
     int sampleRate_ = 48000;
     bool loggedDesktopLost_ = false;
     bool loggedMicLost_ = false;

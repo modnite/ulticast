@@ -122,6 +122,8 @@ enum {
     ID_TOGGLE_MULTIPASS,
     ID_TOGGLE_IDLEPREVIEW,
     ID_TOGGLE_TRAYCLOSE,
+    ID_TOGGLE_MICGATE,
+    ID_SLIDER_GATEDB,
     ID_FIELD_KEY,
     ID_FIELD_URL,
     ID_FIELD_CHROMA,
@@ -409,6 +411,8 @@ private:
     std::wstring statusText_;
     bool statusError_ = false;
     std::wstring lastTitle_;
+    bool lastGateOn_ = false;
+    int lastGateDb_ = -45;
     std::wstring keyText_, urlText_, chromaText_, browserText_;
 
     // pages + scenes
@@ -957,6 +961,14 @@ void UiApp::Paint() {
     if (!sessionRunning_) previewSession_ = false;
     if (!sessionRunning_ && !stats_.failed) errorShown_ = false;
     UpdateWindowTitleState();
+
+    // Live audio-filter updates (gate on/off + threshold apply immediately).
+    if (sessionRunning_ &&
+        (settings_.micGate != lastGateOn_ || settings_.micGateDb != lastGateDb_)) {
+        lastGateOn_ = settings_.micGate;
+        lastGateDb_ = settings_.micGateDb;
+        session_.SetAudioGate(settings_.micGate, (float)settings_.micGateDb);
+    }
 
     RefreshPreview();
 
@@ -1637,7 +1649,7 @@ void UiApp::DrawSettingsPage() {
         Combo(ID_COMBO_GPU, S(x + pad, y, cw, rowH), gpus_, &selGpu_);
         cy += pad + headH + 3 * rowH + 2 * rowGap + pad + cardGap;
 
-        Card(x, cy, w, pad + headH + 5 * rowH + 4 * rowGap + pad, L"CAMERA & AUDIO DEFAULTS");
+        Card(x, cy, w, pad + headH + 6 * rowH + 5 * rowGap + pad, L"CAMERA & AUDIO DEFAULTS");
         y = cy + pad + headH + 4;
         Combo(ID_COMBO_WEBCAMDEV, S(x + pad, y, cw, rowH), webcams_, &selWebcam_);
         y += rowH + rowGap;
@@ -1652,9 +1664,13 @@ void UiApp::DrawSettingsPage() {
         Slider(ID_SLIDER_DESKGAIN, S(x + pad + 244, y, 226, rowH), 0, 200, &deskGainPct_,
                L"Desk %d%%");
         y += rowH + rowGap;
+        Toggle(ID_TOGGLE_MICGATE, S(x + pad, y, 130, rowH), L"Noise gate", &settings_.micGate);
+        Slider(ID_SLIDER_GATEDB, S(x + pad + 146, y, cw - 146, rowH), -80, -20,
+               &settings_.micGateDb, L"%d dB");
+        y += rowH + rowGap;
         Toggle(ID_TOGGLE_CHROMA, S(x + pad, y, 130, rowH), L"Chroma Key", &settings_.chroma);
         Field(ID_FIELD_CHROMA, S(x + pad + 146, y, 160, rowH), &chromaText_, false, L"00FF00");
-        cy += pad + headH + 5 * rowH + 4 * rowGap + pad + cardGap;
+        cy += pad + headH + 6 * rowH + 5 * rowGap + pad + cardGap;
 
         Card(x, cy, w, pad + headH + rowH + pad, L"BROWSER OVERLAY");
         y = cy + pad + headH + 4;
@@ -2223,6 +2239,8 @@ SessionConfig UiApp::BuildConfig() {
     }
     cfg.audio.micGain = settings_.micGain;
     cfg.audio.desktopGain = settings_.desktopGain;
+    cfg.audio.gate = settings_.micGate;
+    cfg.audio.gateDb = (float)settings_.micGateDb;
     cfg.audio.tracks = 1;
     cfg.webcamDevice = (selWebcam_ > 0 && selWebcam_ < (int)webcams_.size())
                            ? webcams_[selWebcam_]
@@ -2811,7 +2829,8 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             if (press_ == ID_SLIDER_CQP || press_ == ID_SLIDER_REPLAY ||
                 press_ == ID_SLIDER_BFRAMES || press_ == ID_SLIDER_MICGAIN ||
-                press_ == ID_SLIDER_DESKGAIN || press_ == ID_SLIDER_RECONNECT) {
+                press_ == ID_SLIDER_DESKGAIN || press_ == ID_SLIDER_RECONNECT ||
+                press_ == ID_SLIDER_GATEDB) {
                 dragging_ = press_;
                 SetSliderFromX(press_, x);
             }
@@ -2841,7 +2860,8 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             for (int tid : {ID_TOGGLE_RECORD, ID_TOGGLE_STREAM, ID_TOGGLE_WEBCAM, ID_TOGGLE_DESKTOP,
                             ID_TOGGLE_MIC, ID_TOGGLE_REPLAY, ID_TOGGLE_CHROMA,
                             ID_TOGGLE_BROWSER, ID_TOGGLE_LOOKAHEAD, ID_TOGGLE_MULTIPASS,
-                            ID_TOGGLE_IDLEPREVIEW, ID_TOGGLE_TRAYCLOSE, ID_SRC_CURSOR}) {
+                            ID_TOGGLE_IDLEPREVIEW, ID_TOGGLE_TRAYCLOSE, ID_TOGGLE_MICGATE,
+                            ID_SRC_CURSOR}) {
                 if (press_ == tid) {
                     bool* target = nullptr;
                     switch (tid) {
@@ -2857,6 +2877,7 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         case ID_TOGGLE_MULTIPASS: target = &settings_.multipass; break;
                         case ID_TOGGLE_IDLEPREVIEW: target = &settings_.idlePreview; break;
                         case ID_TOGGLE_TRAYCLOSE: target = &settings_.closeToTray; break;
+                        case ID_TOGGLE_MICGATE: target = &settings_.micGate; break;
                         case ID_SRC_CURSOR: target = &scenes_[activeScene_].cursor; break;
                     }
                     if (target) *target = !*target;

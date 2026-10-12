@@ -227,6 +227,8 @@ bool LoadUiSettings(UiSettings* s) {
         else if (key == "desktopDevice") s->desktopDevice = val;
         else if (key == "micGain") s->micGain = (float)atof(val.c_str());
         else if (key == "desktopGain") s->desktopGain = (float)atof(val.c_str());
+        else if (key == "micGate") s->micGate = (val == "1");
+        else if (key == "micGateDb") s->micGateDb = atoi(val.c_str());
         else if (key == "idlePreview") s->idlePreview = (val == "1");
         else if (key == "closeToTray") s->closeToTray = (val == "1");
         else if (key == "webcam") s->webcam = (val == "1");
@@ -326,6 +328,8 @@ bool SaveUiSettings(const UiSettings& s) {
     f << "desktopDevice=" << s.desktopDevice << "\n";
     f << "micGain=" << s.micGain << "\n";
     f << "desktopGain=" << s.desktopGain << "\n";
+    f << "micGate=" << (s.micGate ? 1 : 0) << "\n";
+    f << "micGateDb=" << s.micGateDb << "\n";
     f << "idlePreview=" << (s.idlePreview ? 1 : 0) << "\n";
     f << "closeToTray=" << (s.closeToTray ? 1 : 0) << "\n";
     f << "webcam=" << (s.webcam ? 1 : 0) << "\n";

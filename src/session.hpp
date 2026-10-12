@@ -151,6 +151,8 @@ public:
     void SetCursorVisible(bool on) { showCursorLive_.store(on); }
     // Mute/unmute the audio sources at runtime (scene audio sources).
     void SetAudioSourcesLive(bool desktop, bool mic) { mixer_.SetLiveSources(desktop, mic); }
+    // Mic noise gate (threshold in dBFS); safe to call while running.
+    void SetAudioGate(bool on, float db) { mixer_.SetGate(on, db); }
 
     // Runtime output control (OBS-style separate buttons). Commands are queued
     // and applied on the capture thread between frames, so they never race with

@@ -72,6 +72,8 @@ struct Options {
     bool cbr = false;
     uint32_t bitrate = 0;
     int preset = 5;
+    int bframes = 0;
+    bool lookahead = false;
 
     bool noAudio = false;
     bool desktopAudio = true;
@@ -134,6 +136,7 @@ static void PrintUsage() {
         "  Ulticast --platform twitch --key <streamkey> [options]\n\n"
         "Capture:  --monitor N  --window T  --backend auto|wgc|dxgi  --adapter N  --fps N\n"
         "Output:   --out PATH|none  --seconds N  --codec hevc|h264  --cqp N  --cbr --bitrate N  --preset N\n"
+        "          --bframes 0-4  --lookahead\n"
         "Scene:    --webcam  --webcam-device NAME  --webcam-pos P  --webcam-size N\n"
         "          --chroma RRGGBB  --chroma-layer webcam|capture\n"
         "          --browser URL|FILE  --browser-size WxH  --no-cursor\n"
@@ -217,6 +220,8 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == L"--cbr") o.cbr = true;
         else if (a == L"--bitrate") takeU32(o.bitrate);
         else if (a == L"--preset") takeInt(o.preset);
+        else if (a == L"--bframes") takeInt(o.bframes);
+        else if (a == L"--lookahead") o.lookahead = true;
         else if (a == L"--webcam") o.webcam = true;
         else if (a == L"--webcam-device") { takeNext(o.webcamDevice); o.webcam = true; }
         else if (a == L"--webcam-pos") takeS(o.webcamPos);
@@ -413,7 +418,11 @@ int wmain(int argc, wchar_t** argv) {
     }
     cfg.hevc = o.hevc;
     cfg.cqp = o.cqp;
+    cfg.recordCbr = o.cbr;
+    cfg.recordBitrate = o.bitrate ? o.bitrate : 12000;
     cfg.preset = o.preset;
+    cfg.bframes = o.bframes;
+    cfg.lookahead = o.lookahead;
     cfg.noAudio = o.noAudio;
     cfg.audio.desktop = o.desktopAudio;
     cfg.audio.mic = o.mic;

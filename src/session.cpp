@@ -134,6 +134,10 @@ bool Session::Start(const SessionConfig& cfg, std::string* err) {
 
     std::string backend = cfg_.backend;
     for (auto& c : backend) c = (char)tolower((unsigned char)c);
+    // "auto" used to try DXGI duplication first — that hooks fullscreen games
+    // without asking. It now means plain desktop/window capture (WGC); DXGI is
+    // only used when the user explicitly picks it.
+    if (backend.empty() || backend == "auto") backend = "wgc";
 
     if (!cfg_.window.empty()) {
         usingDxgi_ = false;
@@ -307,13 +311,19 @@ bool Session::InitPipeline(uint32_t w, uint32_t h, std::string* err) {
     base.height = h;
     base.fps = cfg_.fps;
     base.preset = cfg_.preset;
+    base.bframes = cfg_.bframes;
+    base.lookahead = cfg_.lookahead;
+    base.multipass = cfg_.multipass;
 
     std::string e;
     if (cfg_.record) {
         EncoderConfig rc = base;
         rc.hevc = cfg_.hevc;
-        rc.cbr = false;
+        rc.rateMode =
+            cfg_.recordCbr ? EncoderConfig::RateMode::CBR : EncoderConfig::RateMode::CQ;
         rc.cqp = cfg_.cqp;
+        rc.bitrateKbps = cfg_.recordBitrate;
+        rc.maxBitrateKbps = cfg_.recordBitrate;
         if (!recEnc_.Init(d3d_.device.Get(), rc, &e)) {
             *err = "record encoder: " + e;
             return false;
@@ -322,8 +332,9 @@ bool Session::InitPipeline(uint32_t w, uint32_t h, std::string* err) {
     if (cfg_.stream) {
         EncoderConfig sc = base;
         sc.hevc = cfg_.streamHevc;
-        sc.cbr = true;
+        sc.rateMode = EncoderConfig::RateMode::CBR;  // streaming wants a predictable bitrate
         sc.bitrateKbps = cfg_.streamBitrate;
+        sc.maxBitrateKbps = cfg_.streamBitrate;
         if (!strEnc_.Init(d3d_.device.Get(), sc, &e)) {
             *err = "stream encoder: " + e;
             return false;
@@ -385,7 +396,7 @@ bool Session::InitPipeline(uint32_t w, uint32_t h, std::string* err) {
     if (cfg_.replay) {
         EncoderConfig rc = base;
         rc.hevc = true;
-        rc.cbr = false;
+        rc.rateMode = EncoderConfig::RateMode::CQ;
         rc.cqp = cfg_.cqp;
         std::vector<uint8_t> audioExtra =
             (audioReady_ && mixer_.AnyActive()) ? mixer_.MixExtradata() : std::vector<uint8_t>{};
@@ -576,7 +587,17 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
             }
             if (webcamSrv_ && camW_ > 0) {
                 float x, y, w, h;
-                if (s.w > 0) {
+                if (s.xr >= 0.f && s.yr >= 0.f) {
+                    // Free position (dragged on the UI preview), clamped on screen.
+                    w = camW_;
+                    h = camH_;
+                    x = s.xr * canvasW;
+                    y = s.yr * canvasH;
+                    if (x + w > canvasW) x = canvasW - w;
+                    if (y + h > canvasH) y = canvasH - h;
+                    if (x < 0) x = 0;
+                    if (y < 0) y = 0;
+                } else if (s.w > 0) {
                     x = (float)s.x;
                     y = (float)s.y;
                     w = (float)s.w;
@@ -914,6 +935,7 @@ Session::Stats Session::GetStats() const {    Stats st;
     st.captured = pacedFrames_.load();
     st.encoded = encoded_.load();
     st.failedFrames = failedFrames_.load();
+    st.dropped = failedFrames_.load();
     st.skippedPaused = skipped_.load();
     st.kbps = kbps_.load();
     st.clipsSaved = replay_.SaveCount();

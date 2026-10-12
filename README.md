@@ -10,7 +10,8 @@ Built from scratch to have the smallest possible per-frame cost on the capture p
 
 - **Installer (recommended):** grab `Ulticast-Setup-x.y.z.exe` from the
   [latest release](https://github.com/modnite/ulticast/releases/latest). Installs both executables,
-  the FFmpeg runtime, the browser-overlay runtime (CEF), and Start Menu / desktop shortcuts.
+  the FFmpeg runtime and the browser-overlay runtime (CEF); Start Menu and desktop shortcuts are
+  optional tasks in the installer.
   Windows 10 2004+ or Windows 11, x64, NVIDIA GPU (NVENC).
 - **Portable:** `Ulticast-portable-x.y.z.zip` — unzip anywhere and run `ulticast-ui.exe`.
 
@@ -32,7 +33,9 @@ Everything needed for a good report is built in:
 Please attach `diagnostics-*.txt` and the newest log to
 [the bug report form](https://github.com/modnite/ulticast/issues/new?template=bug_report.yml).
 
-![Ulticast UI](test/ui_final_idle.png)
+![Ulticast UI — idle preview](test/ui_final_idle.png)
+
+![Ulticast UI — recording](test/ui_final_recording.png)
 
 ## Architecture
 
@@ -61,6 +64,9 @@ Please attach `diagnostics-*.txt` and the newest log to
 - **Stage 4** UI (Direct2D, tray, settings, dual output) — done, verified, polished
 - **Stage 5** chroma key + **browser overlays (CEF offscreen rendering)** + **DXGI cursor compositing** — done, verified
 - **Stage 6** multi-scene / multi-source engine (live scene switching) + two-page UI redesign — done, verified
+- **Stage 7** usability pass: DPI-proof window (resizable/maximizable), idle preview, GPU picker +
+  NVIDIA auto-select, CBR + full CQ range, encoder options, audio device/gain controls, live webcam
+  drag, close-to-tray, start-menu shortcut option — done, verified
 - Next: on-hardware validation on the RTX 3080 rig
 
 ## The UI (Ulticast-ui.exe)
@@ -71,23 +77,31 @@ Dark theme, custom-drawn controls, and a two-page layout: **Live** (scenes, prev
 | Area | Controls |
 |---|---|
 | Scenes | scene list (up to 6), switch live mid-recording, rename, add/remove |
-| Sources | per-scene toggles: **Game Capture**, **Webcam** (+ PiP corner), **Browser Overlay**, **Show Cursor** |
-| Preview | live scene, centered "NO SIGNAL" placeholder, compact stats (elapsed, fps, Mbps, backend, resolution, devices) |
+| Sources | per-scene toggles: **Game/Window Capture**, **Webcam**, **Browser Overlay**, **Show Cursor** — all apply live, no restart |
+| Preview | live scene even while idle (capture-only preview), drag the webcam PiP to move it, centered placeholder, stats pill (resolution, fps, dropped frames) |
 | Transport | Start/Stop, Pause/Resume, Snap Clip, Open Logs, Report Bug, Open Folder |
-| Source | monitor picker, window picker (refreshed on open), capture backend (auto / WGC / DXGI), fps |
-| Camera & audio | webcam device, desktop loopback toggle, mic toggle + device, **chroma key toggle + color** |
-| Video | HEVC / H.264, NVENC preset P1–P7, CQ slider 16–30 |
-| Output | **Record to file** toggle + path + Browse, **Go Live** toggle + platform + stream key |
+| Source | monitor picker, **window picker** (refreshed on open, scrollable), capture backend (**WGC** default / DXGI for fullscreen games), fps, **GPU picker** (NVENC needs the NVIDIA card) |
+| Camera & audio | webcam device, desktop loopback toggle + **output device picker**, mic toggle + device, **mic/desktop gain sliders**, **chroma key toggle + color** |
+| Video | HEVC / H.264, NVENC preset P1–P7, **rate control: Quality (CQ 1–51) or CBR + bitrate**, **B-frames 0–4**, **lookahead**, **two-pass** |
+| Output | **Record to file** toggle + path + Browse, **Go Live** toggle + platform + **stream bitrate** + stream key |
 | Clips | replay toggle + buffer length, Snap Clip (F9 global hotkey) |
 | Overlay | browser overlay HTML file / https:// URL (alerts, chat widgets, custom HTML) |
-| Troubleshooting | Open Logs, Report Bug, Open Folder |
+| Misc | **Idle preview** toggle, **Close to tray** toggle, Open Logs, Report Bug, Open Folder |
 | Activity strip | live engine messages (device init, file path, warnings, errors) |
 
 - **Scenes**: each scene is a named set of sources; switching applies instantly while recording
-  (no restart) — toggle layers on/off or change the webcam corner live. Scenes persist in settings.
+  (no restart) — toggle layers on/off, change the webcam corner, or drag the webcam on the preview.
+  Scenes persist in settings.
+- **Idle preview**: while not recording, Ulticast captures and composites into the preview only —
+  no encoders, no files, and the camera stays free for OBS/NVIDIA Broadcast until you press Start.
+- **No implicit hooks**: the default backend is plain WGC desktop/window capture. DXGI duplication
+  (fullscreen games) is only used when you pick it explicitly.
+- **GPU picker**: auto-prefers the NVIDIA adapter so NVENC works on machines whose iGPU is adapter 0
+  (e.g. an Intel 13600K with a GeForce card).
 - **Dual output**: record to disk *and* stream at the same time (separate NVENC sessions).
-- **Live stats**: elapsed time, frames, fps, throughput, active devices, backend, resolution.
-- **Tray icon**: closing the window hides it; the tray menu can Start/Stop/Pause/Snap/Exit.
+- **Live stats**: uptime, fps, throughput, backend, resolution, dropped frames, active devices.
+- **Tray icon**: the tray menu can Start/Stop/Pause/Snap/Exit; enable **Close to tray** if the X
+  button should keep recording in the background (default: X exits).
 - **Settings** persist to `%APPDATA%\Ulticast\settings.ini`; the stream key is stored
   **DPAPI-encrypted** (per user, never plaintext).
 
@@ -141,7 +155,7 @@ Ulticast --platform twitch --key <key> --also-record backup.mkv
 | Area | Flags |
 |---|---|
 | Capture | `--monitor N`, `--window T`, `--backend auto\|wgc\|dxgi`, `--adapter N`, `--fps N` |
-| Output | `--out PATH\|none`, `--seconds N`, `--codec hevc\|h264`, `--cqp N`, `--cbr --bitrate N`, `--preset N` |
+| Output | `--out PATH\|none`, `--seconds N`, `--codec hevc\|h264`, `--cqp N` (1–51), `--cbr --bitrate N`, `--preset N`, `--bframes 0-4`, `--lookahead` |
 | Scene | `--webcam`, `--webcam-device`, `--webcam-pos`, `--webcam-size`, `--chroma RRGGBB`, `--chroma-layer webcam\|capture`, `--browser URL\|FILE`, `--browser-size WxH` |
 | Clips | `--replay`, `--replay-seconds`, `--replay-prefix`, `--hotkey`, `--clip-at` |
 | Stream | `--platform`, `--key`, `--rtmp URL`, `--also-record PATH`, `--reconnect N` |
@@ -165,3 +179,15 @@ Ulticast --platform twitch --key <key> --also-record backup.mkv
 4. Pause applies to recordings; the final AAC block (~21 ms) is not flushed at stop.
 5. Browser overlays spin up a full Chromium (helper processes, ~300 MB runtime); the first
    paint takes a second or two after a session starts.
+6. Cameras are exclusive: while recording, the selected camera belongs to Ulticast. The idle
+   preview never opens the camera, and Stop releases it immediately.
+7. Virtual cameras that only register with DirectShow (some NVIDIA Broadcast builds) may not show
+   up in the webcam list; check with the Windows Camera app — if it appears there, Ulticast sees it.
+
+## Roadmap
+
+- **Twitch login (OAuth)** instead of pasting a stream key — requires an app registration and the
+  device-code flow.
+- **Audio filters**: noise gate, compressor, per-source monitoring.
+- **DirectShow camera fallback** for virtual cameras that Media Foundation does not enumerate.
+- Multiple simultaneous capture sources per scene (second monitor / window as its own layer).

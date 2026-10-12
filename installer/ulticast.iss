@@ -27,15 +27,16 @@ ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.19041
 
 [Tasks]
+Name: "startmenuicon"; Description: "Create a Start Menu shortcut"; GroupDescription: "Additional shortcuts:"; Flags: checkedonce
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
 
 [Files]
 Source: "..\dist\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 [Icons]
-Name: "{group}\Ulticast"; Filename: "{app}\ulticast-ui.exe"
-Name: "{group}\Ulticast Diagnostics"; Filename: "{app}\ulticast.exe"; Parameters: "--diagnostics"
-Name: "{group}\Ulticast Logs"; Filename: "{app}\ulticast.exe"; Parameters: "--open-logs"
+Name: "{group}\Ulticast"; Filename: "{app}\ulticast-ui.exe"; Tasks: startmenuicon
+Name: "{group}\Ulticast Diagnostics"; Filename: "{app}\ulticast.exe"; Parameters: "--diagnostics"; Tasks: startmenuicon
+Name: "{group}\Ulticast Logs"; Filename: "{app}\ulticast.exe"; Parameters: "--open-logs"; Tasks: startmenuicon
 Name: "{autodesktop}\Ulticast"; Filename: "{app}\ulticast-ui.exe"; Tasks: desktopicon
 
 [Run]

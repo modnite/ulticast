@@ -116,20 +116,31 @@ bool LoadUiSettings(UiSettings* s) {
         if (key == "monitor") s->monitor = atoi(val.c_str());
         else if (key == "window") s->windowTitle = val;
         else if (key == "backend") s->backend = val;
+        else if (key == "gpu") s->gpu = atoi(val.c_str());
         else if (key == "fps") s->fps = (uint32_t)atoi(val.c_str());
         else if (key == "hevc") s->hevc = (val == "1");
         else if (key == "cqp") s->cqp = (uint32_t)atoi(val.c_str());
+        else if (key == "recordCbr") s->recordCbr = (val == "1");
+        else if (key == "recordBitrate") s->recordBitrate = (uint32_t)atoi(val.c_str());
+        else if (key == "bframes") s->bframes = atoi(val.c_str());
+        else if (key == "lookahead") s->lookahead = (val == "1");
+        else if (key == "multipass") s->multipass = (val == "1");
         else if (key == "preset") s->preset = atoi(val.c_str());
         else if (key == "desktopAudio") s->desktopAudio = (val == "1");
         else if (key == "mic") s->mic = (val == "1");
         else if (key == "micDevice") s->micDevice = val;
         else if (key == "desktopDevice") s->desktopDevice = val;
+        else if (key == "micGain") s->micGain = (float)atof(val.c_str());
+        else if (key == "desktopGain") s->desktopGain = (float)atof(val.c_str());
+        else if (key == "idlePreview") s->idlePreview = (val == "1");
+        else if (key == "closeToTray") s->closeToTray = (val == "1");
         else if (key == "webcam") s->webcam = (val == "1");
         else if (key == "webcamDevice") s->webcamDevice = val;
         else if (key == "webcamPos") s->webcamPos = val;
         else if (key == "record") s->record = (val == "1");
         else if (key == "recordPath") s->recordPath = val;
         else if (key == "stream") s->stream = (val == "1");
+        else if (key == "streamBitrate") s->streamBitrate = (uint32_t)atoi(val.c_str());
         else if (key == "platform") s->platform = val;
         else if (key == "streamKeyEnc") s->streamKey = UnprotectKey(val);
         else if (key == "customUrl") s->customUrl = val;
@@ -167,6 +178,8 @@ bool LoadUiSettings(UiSettings* s) {
                 sc.cursor = parts[4] == "0" ? 0 : 1;
                 sc.corner = atoi(parts[5].c_str());
                 if (sc.corner < 0 || sc.corner > 3) sc.corner = 3;
+                if (parts.size() > 6) sc.camX = (float)atof(parts[6].c_str());
+                if (parts.size() > 7) sc.camY = (float)atof(parts[7].c_str());
                 if ((int)s->scenes.size() <= idx) s->scenes.resize(idx + 1);
                 s->scenes[idx] = sc;
             }
@@ -199,20 +212,31 @@ bool SaveUiSettings(const UiSettings& s) {
     f << "monitor=" << s.monitor << "\n";
     f << "window=" << s.windowTitle << "\n";
     f << "backend=" << s.backend << "\n";
+    f << "gpu=" << s.gpu << "\n";
     f << "fps=" << s.fps << "\n";
     f << "hevc=" << (s.hevc ? 1 : 0) << "\n";
     f << "cqp=" << s.cqp << "\n";
+    f << "recordCbr=" << (s.recordCbr ? 1 : 0) << "\n";
+    f << "recordBitrate=" << s.recordBitrate << "\n";
+    f << "bframes=" << s.bframes << "\n";
+    f << "lookahead=" << (s.lookahead ? 1 : 0) << "\n";
+    f << "multipass=" << (s.multipass ? 1 : 0) << "\n";
     f << "preset=" << s.preset << "\n";
     f << "desktopAudio=" << (s.desktopAudio ? 1 : 0) << "\n";
     f << "mic=" << (s.mic ? 1 : 0) << "\n";
     f << "micDevice=" << s.micDevice << "\n";
     f << "desktopDevice=" << s.desktopDevice << "\n";
+    f << "micGain=" << s.micGain << "\n";
+    f << "desktopGain=" << s.desktopGain << "\n";
+    f << "idlePreview=" << (s.idlePreview ? 1 : 0) << "\n";
+    f << "closeToTray=" << (s.closeToTray ? 1 : 0) << "\n";
     f << "webcam=" << (s.webcam ? 1 : 0) << "\n";
     f << "webcamDevice=" << s.webcamDevice << "\n";
     f << "webcamPos=" << s.webcamPos << "\n";
     f << "record=" << (s.record ? 1 : 0) << "\n";
     f << "recordPath=" << s.recordPath << "\n";
     f << "stream=" << (s.stream ? 1 : 0) << "\n";
+    f << "streamBitrate=" << s.streamBitrate << "\n";
     f << "platform=" << s.platform << "\n";
     f << "streamKeyEnc=" << encrypted << "\n";
     f << "customUrl=" << s.customUrl << "\n";
@@ -233,7 +257,7 @@ bool SaveUiSettings(const UiSettings& s) {
             if (c == '|' || c == '\n' || c == '\r') c = ' ';
         f << "scene" << i << "=" << name << "|" << (sc.capture ? 1 : 0) << "|"
           << (sc.webcam ? 1 : 0) << "|" << (sc.browser ? 1 : 0) << "|" << (sc.cursor ? 1 : 0)
-          << "|" << sc.corner << "\n";
+          << "|" << sc.corner << "|" << sc.camX << "|" << sc.camY << "\n";
     }
     return true;
 }

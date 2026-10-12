@@ -57,14 +57,14 @@ constexpr UINT_PTR kTimerId = 1;
 constexpr float kWinW = 1020.f;
 constexpr float kWinH = 660.f;
 
-// palette
-const D2D1_COLOR_F kBg = D2D1::ColorF(0x0E1014);
-const D2D1_COLOR_F kPanel = D2D1::ColorF(0x151922);
-const D2D1_COLOR_F kPanel2 = D2D1::ColorF(0x1B2130);
-const D2D1_COLOR_F kBorder = D2D1::ColorF(0x273040);
-const D2D1_COLOR_F kText = D2D1::ColorF(0xE9EDF5);
-const D2D1_COLOR_F kTextDim = D2D1::ColorF(0x8C96A8);
-const D2D1_COLOR_F kAccent = D2D1::ColorF(0x7C5CFF);
+// palette (violet — as requested)
+const D2D1_COLOR_F kBg = D2D1::ColorF(0x120D1A);
+const D2D1_COLOR_F kPanel = D2D1::ColorF(0x1A1426);
+const D2D1_COLOR_F kPanel2 = D2D1::ColorF(0x241B36);
+const D2D1_COLOR_F kBorder = D2D1::ColorF(0x37274F);
+const D2D1_COLOR_F kText = D2D1::ColorF(0xEFEAF8);
+const D2D1_COLOR_F kTextDim = D2D1::ColorF(0x9B8FB5);
+const D2D1_COLOR_F kAccent = D2D1::ColorF(0xA855F7);
 const D2D1_COLOR_F kAccent2 = D2D1::ColorF(0x22D3EE);
 const D2D1_COLOR_F kRec = D2D1::ColorF(0xFF4D6D);
 const D2D1_COLOR_F kOk = D2D1::ColorF(0x34D399);
@@ -87,6 +87,9 @@ enum {
     ID_SRC_BROWSER,
     ID_SRC_CURSOR,
     ID_COMBO_CORNER,
+    ID_COMBO_GPU,
+    ID_COMBO_RATE,
+    ID_COMBO_DESKDEV,
     ID_TOGGLE_RECORD,
     ID_TOGGLE_STREAM,
     ID_TOGGLE_WEBCAM,
@@ -105,10 +108,19 @@ enum {
     ID_COMBO_PLATFORM,
     ID_SLIDER_CQP,
     ID_SLIDER_REPLAY,
+    ID_SLIDER_BFRAMES,
+    ID_SLIDER_MICGAIN,
+    ID_SLIDER_DESKGAIN,
+    ID_TOGGLE_LOOKAHEAD,
+    ID_TOGGLE_MULTIPASS,
+    ID_TOGGLE_IDLEPREVIEW,
+    ID_TOGGLE_TRAYCLOSE,
     ID_FIELD_KEY,
     ID_FIELD_URL,
     ID_FIELD_CHROMA,
     ID_FIELD_BROWSER,
+    ID_FIELD_BITRATE,
+    ID_FIELD_STREAMBITRATE,
     ID_TOGGLE_CHROMA,
     ID_TOGGLE_BROWSER,
     ID_OPENLOGS,
@@ -116,6 +128,7 @@ enum {
     ID_BROWSE,
     ID_ITEM_BASE = 1000,
     ID_SCENE_BASE = 2000,
+    ID_PREVIEW_WEBCAM = 3000,
 };
 
 enum {
@@ -233,9 +246,12 @@ private:
     ID2D1SolidColorBrush* Br(const D2D1_COLOR_F& c);
     ComPtr<IDWriteTextFormat> MakeFormat(float size, DWRITE_FONT_WEIGHT weight);
 
-    // scale helpers
+    // scale helpers. The layout is designed at kWinW x kWinH "design px"; the
+    // window may be any size (DPI scaling, maximize, resize), so everything is
+    // zoom-to-fit and centered. Hit testing uses the same mapping.
     D2D1_RECT_F S(float x, float y, float w, float h) const {
-        return D2D1::RectF(x * scale_, y * scale_, (x + w) * scale_, (y + h) * scale_);
+        return D2D1::RectF(x * scale_ + offX_, y * scale_ + offY_, (x + w) * scale_ + offX_,
+                           (y + h) * scale_ + offY_);
     }
     float Px(float v) const { return v * scale_; }
     D2D1_RECT_F Inset(const D2D1_RECT_F& r, float dx, float dy) const {
@@ -254,6 +270,10 @@ private:
     void DrawTransport();
     void DrawActivityStrip();
     void DrawPopup();
+    // preview <-> canvas mapping for the draggable webcam PiP
+    D2D1_RECT_F PreviewCanvasToDevice(const D2D1_RECT_F& pr, float cx, float cy, float cw,
+                                      float ch) const;
+    D2D1_RECT_F PreviewWebcamRect(const D2D1_RECT_F& pr) const;
 
     void Text(const std::wstring& s, IDWriteTextFormat* fmt, const D2D1_RECT_F& r,
               const D2D1_COLOR_F& color,
@@ -288,6 +308,9 @@ private:
     std::string BuildStreamUrl();
     void StartSession();
     void StopSession();
+    void StartPreview();
+    void StopPreview();
+    void RestartPreview();  // re-apply source settings to an idle preview
     void OnAction(int id);
     void OnTrayCommand(int id);
     void InitTray();
@@ -299,6 +322,11 @@ private:
     HWND hwnd_ = nullptr;
     UINT dpi_ = 96;
     float scale_ = 1.0f;
+    float offX_ = 0, offY_ = 0;      // centering offset (device px)
+    float viewW_ = kWinW, viewH_ = kWinH;  // client size in DIPs
+    float fit_ = 1.0f;               // zoom factor applied on top of the DPI scale
+    float designW_ = kWinW, designH_ = kWinH;  // visible area in design px
+    float textScale_ = -1.0f;        // scale_ the text formats were built for
     bool exiting_ = false;
 
     ComPtr<ID3D11Device> d3d_;
@@ -328,6 +356,8 @@ private:
     std::vector<Hit> hits_;
     int hover_ = 0, press_ = 0, dragging_ = 0, focus_ = 0, openCombo_ = -1;
     std::map<int, D2D1_RECT_F> comboRects_, sliderRects_, fieldRects_;
+    std::map<int, std::pair<int, int>> sliderRange_;  // id -> (min, max)
+    std::map<int, int*> sliderValue_;                 // id -> bound value
     struct Popup {
         D2D1_RECT_F rect{};
         std::vector<std::wstring> items;
@@ -338,13 +368,18 @@ private:
 
     // data
     std::vector<std::wstring> monitors_, windows_, webcams_, mics_, backends_, fpss_, codecs_,
-        presets_, positions_, platforms_;
+        presets_, positions_, platforms_, gpus_, rates_, desktops_;
     std::vector<std::string> backendKeys_, platformKeys_, posKeys_;
+    std::vector<int> gpuValues_;
+    std::vector<bool> gpuNvenc_;
     std::vector<uint32_t> fpsValues_;
     std::vector<int> presetValues_;
     std::vector<bool> codecHevc_;
     int selMonitor_ = 0, selWindow_ = 0, selWebcam_ = 0, selMic_ = 0, selBackend_ = 0, selFps_ = 1,
-        selCodec_ = 0, selPreset_ = 4, selPos_ = 3, selPlatform_ = 0;
+        selCodec_ = 0, selPreset_ = 4, selPos_ = 3, selPlatform_ = 0, selGpu_ = 0, selRate_ = 0,
+        selDesk_ = 0;
+    std::wstring bitrateText_, streamBitrateText_;
+    int micGainPct_ = 100, deskGainPct_ = 100;
 
     // session + settings
     UiSettings settings_;
@@ -363,16 +398,29 @@ private:
         bool webcam = false;
         bool browser = false;
         bool cursor = true;
-        int corner = 3;  // index into posKeys_
+        int corner = 3;      // index into posKeys_
+        float camX = -1;     // free webcam position (0..1 of the canvas), -1 = corner preset
+        float camY = -1;
     };
     int page_ = 0;  // 0 = Live, 1 = Setup
     std::vector<UiScene> scenes_;
     int activeScene_ = 0;
     std::wstring sceneName_;
     void SyncSceneName();
+    void PushSceneSources();  // send the active scene to a running session (no logging)
     void ApplyLiveScene();
     bool SceneUsesWebcam() const;
     bool SceneUsesBrowser() const;
+
+    // idle preview (capture-only session while not recording)
+    bool previewSession_ = false;
+
+    // webcam drag on the preview
+    bool draggingWebcam_ = false;
+    float dragOffX_ = 0, dragOffY_ = 0;
+
+    // popup scrolling (long lists, e.g. the window picker)
+    int popupScroll_ = 0;
 
     // tray
     NOTIFYICONDATAW nid_{};
@@ -401,12 +449,26 @@ bool UiApp::Init(HINSTANCE instance) {
     wc.lpszClassName = kClassName;
     RegisterClassExW(&wc);
 
-    RECT r{0, 0, (LONG)kWinW, (LONG)kWinH};
-    AdjustWindowRectEx(&r, WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX), FALSE, 0);
+    // Size the window in *physical* pixels for the current DPI: the UI is
+    // per-monitor DPI aware, so a fixed 1020x660 window would be clipped on
+    // 125%/150% displays (missing transport row, popups cut off).
+    const UINT initDpi = GetDpiForSystem();
+    const float initScale = (initDpi ? initDpi : 96) / 96.0f;
+    RECT work{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    LONG cw = (LONG)(kWinW * initScale);
+    LONG ch = (LONG)(kWinH * initScale);
+    if (work.right - work.left > 200) {
+        cw = (std::min)(cw, work.right - work.left - 40);
+        ch = (std::min)(ch, work.bottom - work.top - 40);
+    }
+    RECT r{0, 0, cw, ch};
+    AdjustWindowRectEx(&r, WS_OVERLAPPEDWINDOW, FALSE, 0);
+    const LONG ww = r.right - r.left, wh = r.bottom - r.top;
+    const LONG wx = work.left + ((work.right - work.left) - ww) / 2;
+    const LONG wy = work.top + ((work.bottom - work.top) - wh) / 2;
 
-    hwnd_ = CreateWindowExW(0, kClassName, L"Ulticast",
-                            WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX),
-                            CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top,
+    hwnd_ = CreateWindowExW(0, kClassName, L"Ulticast", WS_OVERLAPPEDWINDOW, wx, wy, ww, wh,
                             nullptr, nullptr, instance, this);
     if (!hwnd_) return false;
 
@@ -415,6 +477,11 @@ bool UiApp::Init(HINSTANCE instance) {
     DwmSetWindowAttribute(hwnd_, DWMWA_USE_IMMERSIVE_DARK_MODE, &darkMode, sizeof(darkMode));
     DWM_WINDOW_CORNER_PREFERENCE corner = DWMWCP_ROUND;
     DwmSetWindowAttribute(hwnd_, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
+    // Purple caption/border to match the theme (Win11; ignored on Win10).
+    COLORREF caption = RGB(0x2A, 0x1B, 0x3D);
+    DwmSetWindowAttribute(hwnd_, 35 /*DWMWA_CAPTION_COLOR*/, &caption, sizeof(caption));
+    COLORREF borderColor = RGB(0x4C, 0x2D, 0x78);
+    DwmSetWindowAttribute(hwnd_, 34 /*DWMWA_BORDER_COLOR*/, &borderColor, sizeof(borderColor));
 
     if (!InitGraphics()) {
         MessageBoxW(hwnd_, L"Direct2D initialization failed.", L"Ulticast", MB_ICONERROR);
@@ -438,6 +505,7 @@ bool UiApp::Init(HINSTANCE instance) {
 
     ShowWindow(hwnd_, SW_SHOW);
     UpdateWindow(hwnd_);
+    if (settings_.idlePreview) StartPreview();
     return true;
 }
 
@@ -736,19 +804,22 @@ void UiApp::Combo(int id, const D2D1_RECT_F& r, const std::vector<std::wstring>&
 void UiApp::SetSliderFromX(int id, float x) {
     auto it = sliderRects_.find(id);
     if (it == sliderRects_.end()) return;
+    auto range = sliderRange_.find(id);
+    auto val = sliderValue_.find(id);
+    if (range == sliderRange_.end() || val == sliderValue_.end() || !val->second) return;
     const float trackR = it->second.right - Px(64);  // must match Slider()'s track end
     float t = (x - it->second.left) / (trackR - it->second.left);
     t = std::clamp(t, 0.f, 1.f);
-    if (id == ID_SLIDER_CQP)
-        settings_.cqp = (uint32_t)(16 + t * 14 + 0.5f);
-    else if (id == ID_SLIDER_REPLAY)
-        settings_.replaySeconds = (int)(10 + t * 110 + 0.5f);
+    const int minV = range->second.first, maxV = range->second.second;
+    *val->second = (int)(minV + t * (maxV - minV) + 0.5f);
 }
 
 void UiApp::Slider(int id, const D2D1_RECT_F& r, int minV, int maxV, int* value,
                    const wchar_t* suffixFmt) {
     hits_.push_back({id, r, true});
     sliderRects_[id] = r;
+    sliderRange_[id] = {minV, maxV};
+    sliderValue_[id] = value;
     float cy = (r.top + r.bottom) / 2;
     float trackR = r.right - Px(64);
     D2D1_RECT_F track = D2D1::RectF(r.left, cy - Px(2), trackR, cy + Px(2));
@@ -825,9 +896,29 @@ void UiApp::Paint() {
         session_.Stop();
     }
     sessionRunning_ = stats_.running;
+    if (!sessionRunning_) previewSession_ = false;
     if (!sessionRunning_ && !stats_.failed) errorShown_ = false;
 
     RefreshPreview();
+
+    // Zoom-to-fit: the design is 1020x660, but the window may be any size
+    // (DPI scaling, maximize, resize) — scale to fit and center it.
+    RECT cr{};
+    GetClientRect(hwnd_, &cr);
+    const float dpiScale = (dpi_ ? dpi_ : 96) / 96.0f;
+    viewW_ = (float)(cr.right - cr.left) / dpiScale;
+    viewH_ = (float)(cr.bottom - cr.top) / dpiScale;
+    fit_ = (std::min)(viewW_ / kWinW, viewH_ / kWinH);
+    fit_ = std::clamp(fit_, 0.6f, 1.6f);
+    scale_ = dpiScale * fit_;
+    offX_ = ((float)(cr.right - cr.left) - kWinW * scale_) * 0.5f;
+    offY_ = ((float)(cr.bottom - cr.top) - kWinH * scale_) * 0.5f;
+    designW_ = viewW_ / fit_;
+    designH_ = viewH_ / fit_;
+    if (fabsf(scale_ - textScale_) > 0.004f) {
+        CreateTextFormats();
+        textScale_ = scale_;
+    }
 
     dc_->BeginDraw();
     dc_->SetTransform(D2D1::Matrix3x2F::Identity());
@@ -836,6 +927,8 @@ void UiApp::Paint() {
     hits_.clear();
     comboRects_.clear();
     sliderRects_.clear();
+    sliderRange_.clear();
+    sliderValue_.clear();
     fieldRects_.clear();
     hasPopup_ = false;
 
@@ -883,6 +976,9 @@ void UiApp::DrawHeader() {
     } else if (!sessionRunning_) {
         label = L"IDLE";
         color = kTextDim;
+    } else if (previewSession_) {
+        label = L"PREVIEW";
+        color = kAccent;
     } else if (stats_.paused) {
         label = L"PAUSED";
         color = kWarn;
@@ -901,6 +997,37 @@ void UiApp::DrawHeader() {
         D2D1::RectF(Px(kWinW - 20) - pillW, Px(14), Px(kWinW - 20), Px(14) + Px(24));
     Pill(pillR, color, label);
     dc_->FillRectangle(S(0, 51, kWinW, 1), Br(kBorder));}
+
+D2D1_RECT_F UiApp::PreviewCanvasToDevice(const D2D1_RECT_F& pr, float cx, float cy, float cw,
+                                         float ch) const {
+    if (previewW_ == 0 || previewH_ == 0) return D2D1::RectF();
+    const float sc = (std::min)((pr.right - pr.left) / (float)previewW_,
+                                (pr.bottom - pr.top) / (float)previewH_);
+    const float dispW = previewW_ * sc, dispH = previewH_ * sc;
+    const float ox = (pr.left + pr.right) / 2 - dispW / 2;
+    const float oy = (pr.top + pr.bottom) / 2 - dispH / 2;
+    return D2D1::RectF(ox + cx * sc, oy + cy * sc, ox + (cx + cw) * sc, oy + (cy + ch) * sc);
+}
+
+D2D1_RECT_F UiApp::PreviewWebcamRect(const D2D1_RECT_F& pr) const {
+    if (scenes_.empty() || stats_.width == 0 || stats_.height == 0) return D2D1::RectF();
+    const UiScene& s = scenes_[activeScene_];
+    const float canvasW = (float)stats_.width, canvasH = (float)stats_.height;
+    const float cw = canvasW / 4.0f;
+    const float ch = cw * 3.0f / 4.0f;  // 4:3 approximation for hit testing
+    float x, y;
+    if (s.camX >= 0 && s.camY >= 0) {
+        x = s.camX * canvasW;
+        y = s.camY * canvasH;
+    } else {
+        const float margin = 16.f;
+        const bool left = s.corner == 0 || s.corner == 2;
+        const bool top = s.corner == 0 || s.corner == 1;
+        x = left ? margin : canvasW - cw - margin;
+        y = top ? margin : canvasH - ch - margin;
+    }
+    return PreviewCanvasToDevice(pr, x, y, cw, ch);
+}
 
 void UiApp::DrawPreview(const D2D1_RECT_F& r) {
     Panel(r, 12, kPanel, true);
@@ -927,13 +1054,16 @@ void UiApp::DrawPreview(const D2D1_RECT_F& r) {
         D2D1_RECT_F c1 = D2D1::RectF(r.left, cy - Px(24), r.right, cy + Px(2));
         D2D1_RECT_F c2 = D2D1::RectF(r.left, cy + Px(2), r.right, cy + Px(26));
         Text(L"NO SIGNAL", fmtSection_, c1, kTextDim, DWRITE_TEXT_ALIGNMENT_CENTER);
-        Text(L"Press Start to see the live scene", fmtSmall_, c2, WithAlpha(kTextDim, 0.7f),
-             DWRITE_TEXT_ALIGNMENT_CENTER);
+        Text(settings_.idlePreview ? L"Starting preview…"
+                                   : L"Idle preview is off — see Setup > Idle preview",
+             fmtSmall_, c2, WithAlpha(kTextDim, 0.7f), DWRITE_TEXT_ALIGNMENT_CENTER);
     }
 
     if (sessionRunning_ && stats_.width) {
         double fps = stats_.elapsed > 0.1 ? stats_.captured / stats_.elapsed : 0.0;
         std::wstring info = Format(L"%u x %u   ·   %.0f fps", stats_.width, stats_.height, fps);
+        if (stats_.dropped)
+            info += Format(L"   ·   %llu dropped", (unsigned long long)stats_.dropped);
         float w = MeasureText(info, fmtSmall_.Get()) + Px(24);
         D2D1_RECT_F pill = D2D1::RectF(r.right - Px(12) - w, r.top + Px(12), r.right - Px(12),
                                        r.top + Px(12) + Px(24));
@@ -947,10 +1077,37 @@ void UiApp::DrawPreview(const D2D1_RECT_F& r) {
     }
 
     if (sessionRunning_ && !stats_.paused) {
-        float pulse = 0.55f + 0.45f * (float)sin(GetTickCount64() / 320.0);
-        D2D1_COLOR_F dot = WithAlpha(settings_.stream ? kAccent2 : kRec, pulse);
-        dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(r.left + Px(20), r.top + Px(20)), Px(6), Px(6)),
-                         Br(dot));
+        if (previewSession_) {
+            dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(r.left + Px(20), r.top + Px(20)), Px(6),
+                                           Px(6)),
+                             Br(WithAlpha(kAccent, 0.85f)));
+        } else {
+            float pulse = 0.55f + 0.45f * (float)sin(GetTickCount64() / 320.0);
+            D2D1_COLOR_F dot = WithAlpha(settings_.stream ? kAccent2 : kRec, pulse);
+            dc_->FillEllipse(
+                D2D1::Ellipse(D2D1::Point2F(r.left + Px(20), r.top + Px(20)), Px(6), Px(6)),
+                Br(dot));
+        }
+    }
+
+    // Draggable webcam PiP (only while a real session has the camera up).
+    if (!previewSession_ && sessionRunning_ && !scenes_.empty() &&
+        scenes_[activeScene_].webcam && !stats_.webcamName.empty()) {
+        D2D1_RECT_F wr = PreviewWebcamRect(r);
+        if (wr.right > wr.left && wr.bottom > wr.top) {
+            hits_.push_back({ID_PREVIEW_WEBCAM, wr, true});
+            if (draggingWebcam_ || hover_ == ID_PREVIEW_WEBCAM) {
+                dc_->DrawRoundedRectangle(D2D1::RoundedRect(wr, Px(4), Px(4)),
+                                          Br(WithAlpha(kAccent, 0.9f)), Px(2));
+                std::wstring hint = L"Drag to move";
+                float tw = MeasureText(hint, fmtSmall_.Get()) + Px(18);
+                D2D1_RECT_F tr =
+                    D2D1::RectF(wr.left, wr.bottom + Px(6), wr.left + tw, wr.bottom + Px(26));
+                dc_->FillRoundedRectangle(D2D1::RoundedRect(tr, Px(6), Px(6)),
+                                          Br(WithAlpha(kBlack, 0.65f)));
+                Text(hint, fmtSmall_, tr, kText, DWRITE_TEXT_ALIGNMENT_CENTER);
+            }
+        }
     }
 }
 
@@ -1021,20 +1178,27 @@ void UiApp::DrawStatsCompact() {
     std::wstring line = Format(L"%.0f fps   ·   %.1f Mbps   ·   %s", fps, stats_.kbps / 1000.0,
                                Widen(stats_.backend).c_str());
     if (stats_.width) line += Format(L"   ·   %ux%u", stats_.width, stats_.height);
+    line += Format(L"   ·   %llu dropped", (unsigned long long)stats_.dropped);
     Text(line, fmtSmall_, S(500, 466, 480, 30), kTextDim, DWRITE_TEXT_ALIGNMENT_TRAILING);
 
-    std::wstring audio = L"no audio";
-    if (!stats_.desktopDevice.empty() && stats_.desktopDevice != L"-")
-        audio = stats_.desktopDevice;
-    if (!stats_.micDevice.empty() && stats_.micDevice != L"-") audio += L" + " + stats_.micDevice;
-    if (!stats_.webcamName.empty()) audio += L"   ·   cam " + stats_.webcamName;
+    std::wstring audio;
+    if (previewSession_)
+        audio = L"Preview — press Start to record or stream";
+    else {
+        audio = L"no audio";
+        if (!stats_.desktopDevice.empty() && stats_.desktopDevice != L"-")
+            audio = stats_.desktopDevice;
+        if (!stats_.micDevice.empty() && stats_.micDevice != L"-")
+            audio += L" + " + stats_.micDevice;
+        if (!stats_.webcamName.empty()) audio += L"   ·   cam " + stats_.webcamName;
+    }
     dc_->PushAxisAlignedClip(S(340, 498, 640, 15), D2D1_ANTIALIAS_MODE_ALIASED);
     Text(audio, fmtSmall_, S(340, 497, 640, 15), WithAlpha(kTextDim, 0.75f));
     dc_->PopAxisAlignedClip();
 }
 
 void UiApp::DrawSetupPage() {
-    const float rowH = 40, gap = 8, sectionGap = 16;
+    const float rowH = 36, gap = 6, sectionGap = 12;
 
     // ---- left column: capture, devices, encoding
     {
@@ -1048,6 +1212,8 @@ void UiApp::DrawSetupPage() {
         y += rowH + gap;
         Combo(ID_COMBO_WINDOW, S(x, y, 300, rowH), windows_, &selWindow_);
         Combo(ID_COMBO_BACKEND, S(x + 308, y, w - 308, rowH), backends_, &selBackend_);
+        y += rowH + gap;
+        Combo(ID_COMBO_GPU, S(x, y, w, rowH), gpus_, &selGpu_);
         y += rowH + sectionGap;
 
         SectionLabel(L"CAMERA & AUDIO", x, y);
@@ -1055,8 +1221,14 @@ void UiApp::DrawSetupPage() {
         Combo(ID_COMBO_WEBCAMDEV, S(x, y, w, rowH), webcams_, &selWebcam_);
         y += rowH + gap;
         Toggle(ID_TOGGLE_DESKTOP, S(x, y, 130, rowH), L"Desktop", &settings_.desktopAudio);
-        Toggle(ID_TOGGLE_MIC, S(x + 138, y, 100, rowH), L"Mic", &settings_.mic);
-        Combo(ID_COMBO_MICDEV, S(x + 246, y, w - 246, rowH), mics_, &selMic_, settings_.mic);
+        Combo(ID_COMBO_DESKDEV, S(x + 138, y, w - 138, rowH), desktops_, &selDesk_,
+              settings_.desktopAudio);
+        y += rowH + gap;
+        Toggle(ID_TOGGLE_MIC, S(x, y, 100, rowH), L"Mic", &settings_.mic);
+        Combo(ID_COMBO_MICDEV, S(x + 108, y, w - 108, rowH), mics_, &selMic_, settings_.mic);
+        y += rowH + gap;
+        Slider(ID_SLIDER_MICGAIN, S(x, y, 236, rowH), 0, 200, &micGainPct_, L"Mic %d%%");
+        Slider(ID_SLIDER_DESKGAIN, S(x + 244, y, 236, rowH), 0, 200, &deskGainPct_, L"Desk %d%%");
         y += rowH + gap;
         Toggle(ID_TOGGLE_CHROMA, S(x, y, 130, rowH), L"Chroma Key", &settings_.chroma);
         Field(ID_FIELD_CHROMA, S(x + 138, y, 160, rowH), &chromaText_, false, L"00FF00");
@@ -1064,15 +1236,25 @@ void UiApp::DrawSetupPage() {
 
         SectionLabel(L"VIDEO", x, y);
         y += 22;
-        Combo(ID_COMBO_CODEC, S(x, y, 236, rowH), codecs_, &selCodec_);
+        Combo(ID_COMBO_RATE, S(x, y, 236, rowH), rates_, &selRate_);
         Combo(ID_COMBO_PRESET, S(x + 244, y, w - 244, rowH), presets_, &selPreset_);
         y += rowH + gap;
-        Text(L"CQ", fmtBody_, S(x, y, 34, rowH), kTextDim);
-        Slider(ID_SLIDER_CQP, S(x + 42, y, w - 42, rowH), 16, 30, (int*)&settings_.cqp,
-               L"CQ %d");
+        if (selRate_ == 0) {
+            Slider(ID_SLIDER_CQP, S(x, y, 236, rowH), 1, 51, (int*)&settings_.cqp, L"CQ %d");
+        } else {
+            Field(ID_FIELD_BITRATE, S(x, y, 236, rowH), &bitrateText_, false,
+                  L"Record bitrate (kbps)");
+        }
+        Slider(ID_SLIDER_BFRAMES, S(x + 244, y, 236, rowH), 0, 4, &settings_.bframes, L"B-frames %d");
+        y += rowH + gap;
+        Toggle(ID_TOGGLE_LOOKAHEAD, S(x, y, 236, rowH), L"Lookahead", &settings_.lookahead);
+        Toggle(ID_TOGGLE_MULTIPASS, S(x + 244, y, 236, rowH), L"Two-pass", &settings_.multipass);
+        y += rowH + gap;
+        Text(L"Codec:", fmtSmall_, S(x, y, 48, rowH), kTextDim);
+        Combo(ID_COMBO_CODEC, S(x + 52, y, 184, rowH), codecs_, &selCodec_);
     }
 
-    // ---- right column: output, clips, stream, overlay
+    // ---- right column: output, clips, stream, overlay, misc
     {
         const float x = 520, w = 480;
         float y = 64;
@@ -1103,17 +1285,20 @@ void UiApp::DrawSetupPage() {
         Combo(ID_COMBO_PLATFORM, S(x, y, 236, rowH), platforms_, &selPlatform_);
         Toggle(ID_TOGGLE_STREAM, S(x + 244, y, w - 244, rowH), L"Go Live", &settings_.stream);
         y += rowH + gap;
+        Field(ID_FIELD_STREAMBITRATE, S(x, y, 150, rowH), &streamBitrateText_, false,
+              L"kbps (CBR)");
         if (platformKeys_[selPlatform_] == "custom")
-            Field(ID_FIELD_URL, S(x, y, w, rowH), &urlText_, false, L"rtmp:// ingest URL");
+            Field(ID_FIELD_URL, S(x + 158, y, w - 158, rowH), &urlText_, false, L"rtmp:// ingest URL");
         else
-            Field(ID_FIELD_KEY, S(x, y, w, rowH), &keyText_, true, L"Stream key (paste)");
+            Field(ID_FIELD_KEY, S(x + 158, y, w - 158, rowH), &keyText_, true,
+                  L"Stream key (paste)");
         y += rowH + sectionGap;
 
         SectionLabel(L"BROWSER OVERLAY", x, y);
         y += 22;
         Field(ID_FIELD_BROWSER, S(x, y, w, rowH), &browserText_, false,
               L"HTML file or https:// URL (add the source in a scene)");
-        y += rowH + sectionGap + 8;
+        y += rowH + sectionGap + 6;
 
         SectionLabel(L"TROUBLESHOOTING", x, y);
         y += 22;
@@ -1121,17 +1306,21 @@ void UiApp::DrawSetupPage() {
         Button(ID_REPORT, S(x + 158, y, 150, rowH), L"Report Bug", BtnStyle::Ghost);
         Button(ID_OPENFOLDER, S(x + 316, y, w - 316, rowH), L"Open Folder", BtnStyle::Ghost,
                settings_.record);
+        y += rowH + gap;
+        Toggle(ID_TOGGLE_IDLEPREVIEW, S(x, y, 236, rowH), L"Idle preview", &settings_.idlePreview);
+        Toggle(ID_TOGGLE_TRAYCLOSE, S(x + 244, y, 236, rowH), L"Close to tray",
+               &settings_.closeToTray);
     }
 }
 
 void UiApp::DrawTransport() {
-    bool running = sessionRunning_;
-    Button(ID_START, S(20, 584, 140, 44), running ? L"Stop" : L"Start",
-           running ? BtnStyle::Danger : BtnStyle::Primary);
+    const bool recording = sessionRunning_ && !previewSession_;
+    Button(ID_START, S(20, 584, 140, 44), recording ? L"Stop" : L"Start",
+           recording ? BtnStyle::Danger : BtnStyle::Primary);
     Button(ID_PAUSE, S(168, 584, 100, 44), stats_.paused ? L"Resume" : L"Pause", BtnStyle::Ghost,
-           running);
+           recording);
     Button(ID_CLIP, S(276, 584, 112, 44), L"Snap Clip", BtnStyle::Ghost,
-           running && settings_.replay);
+           recording && settings_.replay);
     Button(ID_OPENLOGS, S(400, 584, 86, 44), L"Logs", BtnStyle::Ghost);
     Button(ID_REPORT, S(494, 584, 116, 44), L"Report Bug", BtnStyle::Ghost);
     Button(ID_OPENFOLDER, S(868, 584, 132, 44), L"Open Folder", BtnStyle::Ghost,
@@ -1172,26 +1361,46 @@ void UiApp::DrawActivityStrip() {
 void UiApp::DrawPopup() {
     if (!hasPopup_) return;
     const float itemH = 34;
-    float listH = itemH * popup_.items.size() + 8;
+    const float visibleH = (std::min)(kWinH, designH_);  // design px actually on screen
+    int maxItems = (int)((visibleH - 64) / itemH);
+    if (maxItems < 3) maxItems = 3;
+    const int total = (int)popup_.items.size();
+    const int shown = (std::min)(total, maxItems);
+    if (popupScroll_ < 0) popupScroll_ = 0;
+    if (popupScroll_ > total - shown) popupScroll_ = total - shown;
+    if (popupScroll_ < 0) popupScroll_ = 0;
+
+    float listH = itemH * shown + 8;
     D2D1_RECT_F list = D2D1::RectF(popup_.rect.left, popup_.rect.bottom + Px(4),
                                    popup_.rect.right, popup_.rect.bottom + Px(4) + Px(listH));
-    if (list.bottom > Px(kWinH) - Px(20))
+    if (list.bottom > Px(visibleH) - Px(12))
         list = D2D1::RectF(popup_.rect.left, popup_.rect.top - Px(4) - Px(listH),
                            popup_.rect.right, popup_.rect.top - Px(4));
+    if (list.top < Px(8))
+        list = D2D1::RectF(list.left, Px(8), list.right, Px(8) + Px(listH));
     Panel(list, 8, kPanel2, true);
 
-    for (size_t i = 0; i < popup_.items.size(); ++i) {
-        D2D1_RECT_F item = D2D1::RectF(list.left + Px(4), list.top + Px(4) + Px(itemH * i),
-                                       list.right - Px(4), list.top + Px(4) + Px(itemH * (i + 1)));
-        hits_.push_back({ID_ITEM_BASE + (int)i, item, true});
-        bool hovered = hover_ == ID_ITEM_BASE + (int)i;
-        bool selected = popup_.sel && (int)i == *popup_.sel;
+    for (int vi = 0; vi < shown; ++vi) {
+        const int i = popupScroll_ + vi;
+        D2D1_RECT_F item = D2D1::RectF(list.left + Px(4), list.top + Px(4) + Px(itemH * vi),
+                                       list.right - Px(4), list.top + Px(4) + Px(itemH * (vi + 1)));
+        hits_.push_back({ID_ITEM_BASE + i, item, true});
+        bool hovered = hover_ == ID_ITEM_BASE + i;
+        bool selected = popup_.sel && i == *popup_.sel;
         if (hovered || selected)
             dc_->FillRoundedRectangle(D2D1::RoundedRect(item, Px(6), Px(6)),
                                       Br(WithAlpha(kAccent, selected ? 0.35f : 0.2f)));
         dc_->PushAxisAlignedClip(item, D2D1_ANTIALIAS_MODE_ALIASED);
         Text(popup_.items[i], fmtBody_, Inset(item, 10, 0), kText);
         dc_->PopAxisAlignedClip();
+    }
+
+    if (total > shown) {
+        // scroll hint (mouse wheel)
+        D2D1_RECT_F hint = D2D1::RectF(list.left, list.bottom - Px(16), list.right - Px(10),
+                                       list.bottom);
+        std::wstring s = Format(L"%d / %d  (scroll)", popupScroll_ + shown, total);
+        Text(s, fmtSmall_, hint, WithAlpha(kTextDim, 0.8f), DWRITE_TEXT_ALIGNMENT_TRAILING);
     }
 }
 
@@ -1270,8 +1479,29 @@ void UiApp::ReloadDevices() {
     mics_.push_back(L"Default microphone");
     for (auto& d : WasapiCapture::ListCaptureDevices()) mics_.push_back(d.name);
 
-    backends_ = {L"Auto (smart)", L"WGC (cursor)", L"DXGI (fullscreen games)"};
-    backendKeys_ = {"auto", "wgc", "dxgi"};
+    desktops_.clear();
+    desktops_.push_back(L"Default output (desktop audio)");
+    for (auto& d : WasapiCapture::ListRenderDevices()) desktops_.push_back(d.name);
+
+    gpus_.clear();
+    gpuValues_.clear();
+    gpuNvenc_.clear();
+    gpus_.push_back(L"Auto (prefers NVIDIA)");
+    gpuValues_.push_back(-1);
+    gpuNvenc_.push_back(true);
+    for (auto& a : D3DContext::ListAdapters()) {
+        const bool nv = a.vendorId == 0x10DE;
+        std::wstring name = a.name;
+        if (!nv) name += L"  (no NVENC)";
+        gpus_.push_back(name);
+        gpuValues_.push_back(a.index);
+        gpuNvenc_.push_back(nv);
+    }
+    rates_ = {L"Quality (CQ)", L"CBR (bitrate)"};
+
+    // No implicit game hooking: WGC is the default; DXGI is an explicit choice.
+    backends_ = {L"WGC (desktop)", L"DXGI (fullscreen games)"};
+    backendKeys_ = {"wgc", "dxgi"};
     fpss_ = {L"30 fps", L"60 fps", L"120 fps"};
     fpsValues_ = {30, 60, 120};
     codecs_ = {L"HEVC (smaller files)", L"H.264 (compatible)"};
@@ -1305,6 +1535,11 @@ void UiApp::ApplySettingsToUi() {
     urlText_ = Widen(settings_.customUrl);
     chromaText_ = Widen(settings_.chromaColor);
     browserText_ = Widen(settings_.browserUrl);
+    bitrateText_ = Format(L"%u", settings_.recordBitrate);
+    streamBitrateText_ = Format(L"%u", settings_.streamBitrate);
+    micGainPct_ = (int)std::lround(settings_.micGain * 100.0f);
+    deskGainPct_ = (int)std::lround(settings_.desktopGain * 100.0f);
+    selRate_ = settings_.recordCbr ? 1 : 0;
 
     auto find = [](const std::vector<std::wstring>& list, const std::wstring& needle) {
         if (needle.empty()) return 0;
@@ -1327,6 +1562,9 @@ void UiApp::ApplySettingsToUi() {
     selMonitor_ = settings_.monitor;
     selWebcam_ = find(webcams_, Widen(settings_.webcamDevice));
     selMic_ = find(mics_, Widen(settings_.micDevice));
+    selDesk_ = find(desktops_, Widen(settings_.desktopDevice));
+    for (size_t i = 0; i < gpuValues_.size(); ++i)
+        if (gpuValues_[i] == settings_.gpu) selGpu_ = (int)i;
     if (!settings_.windowTitle.empty()) selWindow_ = find(windows_, Widen(settings_.windowTitle));
 
     // scenes
@@ -1339,6 +1577,8 @@ void UiApp::ApplySettingsToUi() {
         us.browser = s.browser != 0;
         us.cursor = s.cursor != 0;
         us.corner = (s.corner >= 0 && s.corner < (int)posKeys_.size()) ? s.corner : 3;
+        us.camX = s.camX;
+        us.camY = s.camY;
         scenes_.push_back(us);
     }
     if (scenes_.empty()) {
@@ -1357,9 +1597,19 @@ void UiApp::SyncSettingsFromUi() {
                                 ? Narrow(windows_[selWindow_])
                                 : "";
     settings_.backend = backendKeys_[selBackend_];
+    settings_.gpu = (selGpu_ >= 0 && selGpu_ < (int)gpuValues_.size()) ? gpuValues_[selGpu_] : -1;
     settings_.fps = fpsValues_[selFps_];
     settings_.hevc = codecHevc_[selCodec_];
     settings_.preset = presetValues_[selPreset_];
+    settings_.recordCbr = selRate_ == 1;
+    settings_.recordBitrate = (uint32_t)(std::max)(1000, _wtoi(bitrateText_.c_str()));
+    settings_.streamBitrate =
+        (uint32_t)std::clamp(_wtoi(streamBitrateText_.c_str()), 100, 200000);
+    settings_.micGain = micGainPct_ / 100.0f;
+    settings_.desktopGain = deskGainPct_ / 100.0f;
+    settings_.desktopDevice = (selDesk_ > 0 && selDesk_ < (int)desktops_.size())
+                                  ? Narrow(desktops_[selDesk_])
+                                  : "";
     settings_.webcamDevice = (selWebcam_ > 0 && selWebcam_ < (int)webcams_.size())
                                  ? Narrow(webcams_[selWebcam_])
                                  : "";
@@ -1381,6 +1631,8 @@ void UiApp::SyncSettingsFromUi() {
         us.browser = s.browser ? 1 : 0;
         us.cursor = s.cursor ? 1 : 0;
         us.corner = s.corner;
+        us.camX = s.camX;
+        us.camY = s.camY;
         settings_.scenes.push_back(us);
     }
     settings_.activeScene = activeScene_;
@@ -1407,7 +1659,7 @@ bool UiApp::SceneUsesBrowser() const {
     return false;
 }
 
-void UiApp::ApplyLiveScene() {
+void UiApp::PushSceneSources() {
     if (!sessionRunning_ || scenes_.empty()) return;
     const UiScene& sc = scenes_[activeScene_];
     std::vector<SessionSource> sources;
@@ -1418,6 +1670,8 @@ void UiApp::ApplyLiveScene() {
     if (sc.webcam) {
         SessionSource w;
         w.type = SessionSourceType::Webcam;
+        w.xr = sc.camX;
+        w.yr = sc.camY;
         sources.push_back(w);
     }
     if (sc.browser) {
@@ -1428,7 +1682,14 @@ void UiApp::ApplyLiveScene() {
     const int corner = (sc.corner >= 0 && sc.corner < (int)posKeys_.size()) ? sc.corner : 3;
     session_.SetSources(std::move(sources), posKeys_[corner]);
     session_.SetCursorVisible(sc.cursor);
+}
+
+void UiApp::ApplyLiveScene() {
+    if (!sessionRunning_ || scenes_.empty()) return;
+    PushSceneSources();
+    const UiScene& sc = scenes_[activeScene_];
     AddLog(L"Scene: " + sc.name);
+    if (previewSession_) return;  // no pipeline hints while previewing
 
     // Pipelines are decided at Start; tell the user if a newly added source
     // can't appear until the next Start.
@@ -1459,21 +1720,30 @@ SessionConfig UiApp::BuildConfig() {
     cfg.monitor = selMonitor_;
     if (selWindow_ > 0 && selWindow_ < (int)windows_.size()) cfg.window = windows_[selWindow_];
     cfg.backend = settings_.backend;
+    cfg.adapter = settings_.gpu;
     cfg.fps = settings_.fps;
     cfg.record = settings_.record;
     cfg.recordPath = settings_.recordPath;
     cfg.stream = settings_.stream;
     cfg.streamUrl = BuildStreamUrl();
-    cfg.streamBitrate = 6000;
+    cfg.streamBitrate = settings_.streamBitrate;
     cfg.reconnect = 5;
     cfg.hevc = settings_.hevc;
     cfg.cqp = settings_.cqp;
+    cfg.recordCbr = settings_.recordCbr;
+    cfg.recordBitrate = settings_.recordBitrate;
+    cfg.bframes = settings_.bframes;
+    cfg.lookahead = settings_.lookahead;
+    cfg.multipass = settings_.multipass;
     cfg.preset = settings_.preset;
     cfg.audio.desktop = settings_.desktopAudio;
     cfg.audio.mic = settings_.mic;
-    cfg.audio.desktopDevice = L"default";
+    cfg.audio.desktopDevice =
+        settings_.desktopDevice.empty() ? L"default" : Widen(settings_.desktopDevice);
     cfg.audio.micDevice =
         (selMic_ > 0 && selMic_ < (int)mics_.size()) ? mics_[selMic_] : L"default";
+    cfg.audio.micGain = settings_.micGain;
+    cfg.audio.desktopGain = settings_.desktopGain;
     cfg.audio.tracks = 1;
     cfg.webcamDevice = (selWebcam_ > 0 && selWebcam_ < (int)webcams_.size())
                            ? webcams_[selWebcam_]
@@ -1503,6 +1773,8 @@ SessionConfig UiApp::BuildConfig() {
     if (sc.webcam) {
         SessionSource w;
         w.type = SessionSourceType::Webcam;
+        w.xr = sc.camX;
+        w.yr = sc.camY;
         cfg.sources.push_back(w);
     }
     if (sc.browser) {
@@ -1554,6 +1826,13 @@ void UiApp::StartSession() {
         statusError_ = true;
         return;
     }
+    if (selGpu_ > 0 && selGpu_ < (int)gpuNvenc_.size() && !gpuNvenc_[selGpu_]) {
+        statusText_ = L"That GPU has no NVENC encoder — pick Auto or your NVIDIA card";
+        statusError_ = true;
+        return;
+    }
+
+    StopPreview();
 
     SessionConfig cfg = BuildConfig();
     std::string err;
@@ -1572,12 +1851,52 @@ void UiApp::StopSession() {
     session_.Stop();
     stats_ = session_.GetStats();
     sessionRunning_ = false;
+    previewSession_ = false;
     AddLog(L"Stopped");
+    StartPreview();  // back to the idle preview
+}
+
+void UiApp::StartPreview() {
+    if (sessionRunning_ || !settings_.idlePreview) return;
+    SessionConfig cfg = BuildConfig();
+    // Preview only: capture + composite + the shared preview texture. No audio,
+    // no camera (it stays free for OBS/Broadcast), no encoders or muxers.
+    cfg.record = false;
+    cfg.stream = false;
+    cfg.replay = false;
+    cfg.noAudio = true;
+    cfg.audio.desktop = false;
+    cfg.audio.mic = false;
+    cfg.webcam = false;
+    cfg.browser = false;
+    cfg.browserUrl.clear();
+    std::string err;
+    if (!session_.Start(cfg, &err)) {
+        AddLog(L"Preview: " + Widen(err));
+        return;
+    }
+    previewSession_ = true;
+    AddLog(L"Idle preview on");
+}
+
+void UiApp::StopPreview() {
+    if (!previewSession_) return;
+    session_.Stop();
+    previewSession_ = false;
+}
+
+void UiApp::RestartPreview() {
+    if (!previewSession_) return;
+    StopPreview();
+    StartPreview();
 }
 
 void UiApp::UpdateWindowTitleState() {
     std::wstring t = L"Ulticast";
-    if (sessionRunning_) t += stats_.paused ? L" — paused" : L" — recording";
+    if (previewSession_)
+        t += L" — preview";
+    else if (sessionRunning_)
+        t += stats_.paused ? L" — paused" : L" — recording";
     SetWindowTextW(hwnd_, t.c_str());
 }
 
@@ -1597,7 +1916,15 @@ void UiApp::OnAction(int id) {
         int index = id - ID_ITEM_BASE;
         if (openCombo_ >= 0 && index >= 0 && index < (int)popup_.items.size()) {
             if (popup_.sel) *popup_.sel = index;
-            if (openCombo_ == ID_COMBO_CORNER) ApplyLiveScene();
+            if (openCombo_ == ID_COMBO_CORNER) {
+                // picking a preset clears the dragged free position
+                if (!scenes_.empty()) scenes_[activeScene_].camX = scenes_[activeScene_].camY = -1;
+                ApplyLiveScene();
+            }
+            if (openCombo_ == ID_COMBO_MONITOR || openCombo_ == ID_COMBO_WINDOW ||
+                openCombo_ == ID_COMBO_BACKEND || openCombo_ == ID_COMBO_FPS ||
+                openCombo_ == ID_COMBO_GPU)
+                RestartPreview();
             if (openCombo_ == ID_COMBO_WINDOW) {
                 // refresh window list on demand
             }
@@ -1609,7 +1936,7 @@ void UiApp::OnAction(int id) {
 
     switch (id) {
         case ID_START:
-            if (sessionRunning_)
+            if (sessionRunning_ && !previewSession_)
                 StopSession();
             else
                 StartSession();
@@ -1668,6 +1995,13 @@ void UiApp::OnAction(int id) {
                 keyText_.empty()) {
                 statusText_ = L"Enter a stream key first";
                 statusError_ = true;
+            }
+            break;
+        case ID_TOGGLE_IDLEPREVIEW:
+            if (settings_.idlePreview) {
+                if (!sessionRunning_) StartPreview();
+            } else {
+                StopPreview();
             }
             break;
         case ID_TAB_LIVE:
@@ -1729,13 +2063,14 @@ void UiApp::ShowTrayMenu() {
     POINT pt{};
     GetCursorPos(&pt);
     HMENU menu = CreatePopupMenu();
+    const bool recording = sessionRunning_ && !previewSession_;
     AppendMenuW(menu, MF_STRING, ID_TRAY_SHOW, L"Show Ulticast");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING | (sessionRunning_ ? MF_GRAYED : 0), ID_TRAY_START, L"Start");
-    AppendMenuW(menu, MF_STRING | (!sessionRunning_ ? MF_GRAYED : 0), ID_TRAY_START + 100, L"Stop");
-    AppendMenuW(menu, MF_STRING | (!sessionRunning_ ? MF_GRAYED : 0), ID_TRAY_PAUSE,
+    AppendMenuW(menu, MF_STRING | (recording ? MF_GRAYED : 0), ID_TRAY_START, L"Start");
+    AppendMenuW(menu, MF_STRING | (!recording ? MF_GRAYED : 0), ID_TRAY_START + 100, L"Stop");
+    AppendMenuW(menu, MF_STRING | (!recording ? MF_GRAYED : 0), ID_TRAY_PAUSE,
                 stats_.paused ? L"Resume" : L"Pause");
-    AppendMenuW(menu, MF_STRING | (!sessionRunning_ || !settings_.replay ? MF_GRAYED : 0),
+    AppendMenuW(menu, MF_STRING | (!recording || !settings_.replay ? MF_GRAYED : 0),
                 ID_TRAY_CLIP, L"Snap Clip");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, L"Exit");
@@ -1759,7 +2094,7 @@ void UiApp::OnTrayCommand(int id) {
             StopSession();
             break;
         case ID_TRAY_PAUSE:
-            session_.SetPaused(!session_.Paused());
+            if (sessionRunning_ && !previewSession_) session_.SetPaused(!session_.Paused());
             break;
         case ID_TRAY_CLIP:
             session_.SaveClip();
@@ -1816,7 +2151,10 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 bool hand = false, ibeam = false;
                 for (auto& h : hits_) {
                     if (h.enabled && h.id == hover_) {
-                        if (h.id == ID_FIELD_KEY || h.id == ID_FIELD_URL)
+                        if (h.id == ID_FIELD_KEY || h.id == ID_FIELD_URL ||
+                            h.id == ID_FIELD_CHROMA || h.id == ID_FIELD_BROWSER ||
+                            h.id == ID_SCENE_NAME || h.id == ID_FIELD_BITRATE ||
+                            h.id == ID_FIELD_STREAMBITRATE)
                             ibeam = true;
                         else
                             hand = true;
@@ -1827,6 +2165,21 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 return TRUE;
             }
             break;
+        }
+        case WM_MOUSEWHEEL: {
+            if (hasPopup_ && popup_.items.size() > 1) {
+                int delta = GET_WHEEL_DELTA_WPARAM(wp);
+                popupScroll_ -= (delta > 0 ? 1 : -1) * 3;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+        }
+        case WM_GETMINMAXINFO: {
+            auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
+            const float s = (dpi_ ? dpi_ : 96) / 96.0f * 0.62f;  // smallest zoom-to-fit size
+            mmi->ptMinTrackSize.x = (LONG)(kWinW * s);
+            mmi->ptMinTrackSize.y = (LONG)(kWinH * s);
+            return 0;
         }
         case WM_TIMER:
             if (wp == kTimerId) InvalidateRect(hwnd, nullptr, FALSE);
@@ -1852,6 +2205,23 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
             }
+            if (draggingWebcam_ && !scenes_.empty() && stats_.width && previewW_ && previewH_) {
+                D2D1_RECT_F pr = S(320, 64, 680, 383);
+                const float sc = (std::min)((pr.right - pr.left) / (float)previewW_,
+                                            (pr.bottom - pr.top) / (float)previewH_);
+                const float ox = (pr.left + pr.right) / 2 - previewW_ * sc / 2;
+                const float oy = (pr.top + pr.bottom) / 2 - previewH_ * sc / 2;
+                const float canvasW = (float)stats_.width, canvasH = (float)stats_.height;
+                const float camW = canvasW / 4.0f, camH = camW * 3.0f / 4.0f;
+                float cx = ((x - dragOffX_) - ox) / sc;
+                float cy = ((y - dragOffY_) - oy) / sc;
+                cx = std::clamp(cx, 0.f, (std::max)(0.f, canvasW - camW));
+                cy = std::clamp(cy, 0.f, (std::max)(0.f, canvasH - camH));
+                scenes_[activeScene_].camX = cx / canvasW;
+                scenes_[activeScene_].camY = cy / canvasH;
+                PushSceneSources();
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
             return 0;
         }
         case WM_LBUTTONDOWN: {
@@ -1864,16 +2234,24 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     break;
                 }
             }
-            if (press_ == ID_SLIDER_CQP || press_ == ID_SLIDER_REPLAY) {
+            if (press_ == ID_SLIDER_CQP || press_ == ID_SLIDER_REPLAY ||
+                press_ == ID_SLIDER_BFRAMES || press_ == ID_SLIDER_MICGAIN ||
+                press_ == ID_SLIDER_DESKGAIN) {
                 dragging_ = press_;
                 SetSliderFromX(press_, x);
+            }
+            if (press_ == ID_PREVIEW_WEBCAM) {
+                draggingWebcam_ = true;
+                D2D1_RECT_F wr = PreviewWebcamRect(S(320, 64, 680, 383));
+                dragOffX_ = x - wr.left;
+                dragOffY_ = y - wr.top;
             }
             SetCapture(hwnd_);
 
             // text fields: focus on click
             int newFocus = 0;
             for (int fid : {ID_FIELD_KEY, ID_FIELD_URL, ID_FIELD_CHROMA, ID_FIELD_BROWSER,
-                            ID_SCENE_NAME}) {
+                            ID_SCENE_NAME, ID_FIELD_BITRATE, ID_FIELD_STREAMBITRATE}) {
                 auto it = fieldRects_.find(fid);
                 if (it != fieldRects_.end() && x >= it->second.left && x < it->second.right &&
                     y >= it->second.top && y < it->second.bottom)
@@ -1887,8 +2265,9 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             // toggles act immediately
             for (int tid : {ID_TOGGLE_RECORD, ID_TOGGLE_STREAM, ID_TOGGLE_WEBCAM, ID_TOGGLE_DESKTOP,
                             ID_TOGGLE_MIC, ID_TOGGLE_REPLAY, ID_TOGGLE_CHROMA,
-                            ID_TOGGLE_BROWSER, ID_SRC_CAPTURE, ID_SRC_WEBCAM, ID_SRC_BROWSER,
-                            ID_SRC_CURSOR}) {
+                            ID_TOGGLE_BROWSER, ID_TOGGLE_LOOKAHEAD, ID_TOGGLE_MULTIPASS,
+                            ID_TOGGLE_IDLEPREVIEW, ID_TOGGLE_TRAYCLOSE, ID_SRC_CAPTURE,
+                            ID_SRC_WEBCAM, ID_SRC_BROWSER, ID_SRC_CURSOR}) {
                 if (press_ == tid) {
                     bool* target = nullptr;
                     switch (tid) {
@@ -1900,6 +2279,10 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         case ID_TOGGLE_REPLAY: target = &settings_.replay; break;
                         case ID_TOGGLE_CHROMA: target = &settings_.chroma; break;
                         case ID_TOGGLE_BROWSER: target = &settings_.browser; break;
+                        case ID_TOGGLE_LOOKAHEAD: target = &settings_.lookahead; break;
+                        case ID_TOGGLE_MULTIPASS: target = &settings_.multipass; break;
+                        case ID_TOGGLE_IDLEPREVIEW: target = &settings_.idlePreview; break;
+                        case ID_TOGGLE_TRAYCLOSE: target = &settings_.closeToTray; break;
                         case ID_SRC_CAPTURE: target = &scenes_[activeScene_].capture; break;
                         case ID_SRC_WEBCAM: target = &scenes_[activeScene_].webcam; break;
                         case ID_SRC_BROWSER: target = &scenes_[activeScene_].browser; break;
@@ -1915,6 +2298,7 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             for (auto& [id, rect] : comboRects_) {
                 if (press_ == id) {
                     openCombo_ = (openCombo_ == id) ? -1 : id;
+                    popupScroll_ = 0;
                     if (openCombo_ == ID_COMBO_WINDOW) {
                         // refresh the window list on open
                         std::wstring keep = selWindow_ > 0 && selWindow_ < (int)windows_.size()
@@ -1936,6 +2320,11 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_LBUTTONUP: {
             float x = (float)GET_X_LPARAM(lp), y = (float)GET_Y_LPARAM(lp);
             dragging_ = 0;
+            if (draggingWebcam_) {
+                draggingWebcam_ = false;
+                SyncSettingsFromUi();
+                SaveUiSettings(settings_);
+            }
             int released = 0;
             for (auto it = hits_.rbegin(); it != hits_.rend(); ++it) {
                 if (it->enabled && x >= it->rect.left && x < it->rect.right && y >= it->rect.top &&
@@ -1971,6 +2360,8 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             else if (focus_ == ID_FIELD_CHROMA) target = &chromaText_;
             else if (focus_ == ID_FIELD_BROWSER) target = &browserText_;
             else if (focus_ == ID_SCENE_NAME) target = &sceneName_;
+            else if (focus_ == ID_FIELD_BITRATE) target = &bitrateText_;
+            else if (focus_ == ID_FIELD_STREAMBITRATE) target = &streamBitrateText_;
             if (!target) return 0;
             if (c == 8) {  // backspace
                 if (!target->empty()) target->pop_back();
@@ -2002,6 +2393,14 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 chromaText_ = filtered;
             } else if (focus_ == ID_SCENE_NAME && !scenes_.empty()) {
                 scenes_[activeScene_].name = sceneName_;
+            } else if (focus_ == ID_FIELD_BITRATE || focus_ == ID_FIELD_STREAMBITRATE) {
+                // digits only
+                std::wstring* fld =
+                    focus_ == ID_FIELD_BITRATE ? &bitrateText_ : &streamBitrateText_;
+                std::wstring filtered;
+                for (wchar_t ch : *fld)
+                    if (iswdigit(ch) && filtered.size() < 6) filtered += ch;
+                *fld = filtered;
             }
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
@@ -2027,8 +2426,14 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp >= ID_TRAY_SHOW && wp <= ID_TRAY_EXIT + 200) OnTrayCommand((int)wp);
             return 0;
         case WM_CLOSE:
-            if (exiting_) DestroyWindow(hwnd);
-            else ShowWindow(hwnd, SW_HIDE);  // keep running in the tray
+            // X closes the app (as expected); enable "Close to tray" in Setup to
+            // keep recording in the background instead.
+            if (exiting_ || !settings_.closeToTray) {
+                exiting_ = true;
+                DestroyWindow(hwnd);
+            } else {
+                ShowWindow(hwnd, SW_HIDE);
+            }
             return 0;
         case WM_DESTROY:
             PostQuitMessage(0);

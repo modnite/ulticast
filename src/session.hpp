@@ -30,6 +30,9 @@ struct SessionSource {
     SessionSourceType type = SessionSourceType::Capture;
     bool enabled = true;
     int x = 0, y = 0, w = 0, h = 0;
+    // Optional fractional position (0..1 of the canvas) for the webcam PiP;
+    // -1 = use the corner preset. Used by drag-to-move on the UI preview.
+    float xr = -1.f, yr = -1.f;
 };
 
 // Everything a run needs. The UI fills this from its widgets; the CLI from flags.
@@ -52,8 +55,13 @@ struct SessionConfig {
 
     // recording encoder
     bool hevc = true;
-    uint32_t cqp = 20;
+    uint32_t cqp = 20;              // CQ level 1..51
+    bool recordCbr = false;         // record with CBR bitrate instead of CQ
+    uint32_t recordBitrate = 12000; // kbps when recordCbr
     int preset = 5;
+    int bframes = 0;
+    bool lookahead = false;
+    bool multipass = false;
 
     // audio
     bool noAudio = false;
@@ -103,6 +111,7 @@ public:
         uint64_t captured = 0;
         uint64_t encoded = 0;
         uint64_t failedFrames = 0;
+        uint64_t dropped = 0;       // frames the encoder refused (visual drop indicator)
         uint64_t skippedPaused = 0;
         double kbps = 0;
         int clipsSaved = 0;

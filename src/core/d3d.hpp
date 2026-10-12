@@ -10,6 +10,7 @@ using Microsoft::WRL::ComPtr;
 struct AdapterInfo {
     int index = 0;
     std::wstring name;
+    uint32_t vendorId = 0;  // PCI vendor: 0x10DE = NVIDIA, 0x8086 = Intel, 0x1002 = AMD
 };
 
 // The single D3D11 device/context every capture + encode path shares.
@@ -20,6 +21,8 @@ struct D3DContext {
     ComPtr<ID3D11DeviceContext> context;
 
     static std::vector<AdapterInfo> ListAdapters();
-    // adapterIndex < 0 = system default
+    // Index of the first NVIDIA adapter, or -1 when there is none.
+    static int PreferredAdapter();
+    // adapterIndex < 0 = auto (prefers the NVIDIA GPU so NVENC works)
     bool Create(std::string* err, int adapterIndex = -1);
 };

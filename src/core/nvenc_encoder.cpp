@@ -15,7 +15,25 @@ static GUID PresetGuid(int p) {
 }
 
 static std::string NvErr(NVENCSTATUS st) {
-    return "NVENC status " + std::to_string((int)st);
+    const char* name = "NVENC error";
+    switch (st) {
+        case NV_ENC_ERR_NO_ENCODE_DEVICE:
+            name = "this GPU has no NVENC encoder (no encode device)";
+            break;
+        case NV_ENC_ERR_UNSUPPORTED_DEVICE: name = "unsupported device for NVENC"; break;
+        case NV_ENC_ERR_INVALID_DEVICE: name = "invalid Direct3D device for NVENC"; break;
+        case NV_ENC_ERR_INVALID_ENCODERDEVICE: name = "invalid encoder device"; break;
+        case NV_ENC_ERR_DEVICE_NOT_EXIST: name = "encoder device not found (driver mismatch)"; break;
+        case NV_ENC_ERR_UNSUPPORTED_PARAM: name = "unsupported encoder parameter"; break;
+        case NV_ENC_ERR_INVALID_VERSION:
+            name = "NVENC API version mismatch — update the NVIDIA driver";
+            break;
+        case NV_ENC_ERR_OUT_OF_MEMORY: name = "out of memory"; break;
+        case NV_ENC_ERR_ENCODER_BUSY: name = "encoder busy"; break;
+        case NV_ENC_ERR_GENERIC: name = "generic encoder error"; break;
+        default: break;
+    }
+    return std::string(name) + " (NVENC status " + std::to_string((int)st) + ")";
 }
 
 bool NvencEncoder::Init(ID3D11Device* device, const EncoderConfig& cfg, std::string* err) {
@@ -47,7 +65,9 @@ bool NvencEncoder::Init(ID3D11Device* device, const EncoderConfig& cfg, std::str
     op.apiVersion = NVENCAPI_VERSION;
     st = fn_.nvEncOpenEncodeSessionEx(&op, &session_);
     if (st != NV_ENC_SUCCESS) {
-        *err = NvErr(st);
+        *err = NvErr(st) +
+               " — NVENC needs the NVIDIA GPU: pick it under Setup > Source > GPU"
+               " (an Intel/AMD adapter cannot encode with NVENC)";
         return false;
     }
     open_ = true;
@@ -68,20 +88,26 @@ bool NvencEncoder::Init(ID3D11Device* device, const EncoderConfig& cfg, std::str
     NV_ENC_CONFIG conf = pc.presetCfg;
     conf.gopLength = cfg.fps * cfg.gopSeconds;
     conf.frameIntervalP = cfg.bframes + 1;
-    // Deterministic one-in/one-out ordering: no lookahead-driven reordering.
-    conf.rcParams.enableLookahead = 0;
+    conf.rcParams.enableLookahead = cfg.lookahead ? 1 : 0;
+    if (cfg.multipass)
+        conf.rcParams.multiPass = NV_ENC_TWO_PASS_FULL_RESOLUTION;
+    else
+        conf.rcParams.multiPass = NV_ENC_MULTI_PASS_DISABLED;
 
-    if (cfg.cbr) {
+    if (cfg.rateMode == EncoderConfig::RateMode::CBR) {
+        const uint32_t target = cfg.bitrateKbps;
+        const uint32_t peak = cfg.maxBitrateKbps ? cfg.maxBitrateKbps : target;
         conf.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
-        conf.rcParams.averageBitRate = cfg.bitrateKbps * 1000;
-        conf.rcParams.maxBitRate = cfg.bitrateKbps * 1000;
-        conf.rcParams.vbvBufferSize = cfg.bitrateKbps * 1000 * 2;
+        conf.rcParams.averageBitRate = target * 1000;
+        conf.rcParams.maxBitRate = peak * 1000;
+        conf.rcParams.vbvBufferSize = peak * 1000 * 2;
         conf.rcParams.vbvInitialDelay = conf.rcParams.vbvBufferSize;
     } else {
         conf.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CONSTQP;
-        conf.rcParams.constQP.qpIntra = cfg.cqp;
-        conf.rcParams.constQP.qpInterP = cfg.cqp;
-        conf.rcParams.constQP.qpInterB = cfg.cqp;
+        const uint32_t q = cfg.cqp < 1 ? 1 : (cfg.cqp > 51 ? 51 : cfg.cqp);
+        conf.rcParams.constQP.qpIntra = q;
+        conf.rcParams.constQP.qpInterP = q;
+        conf.rcParams.constQP.qpInterB = q;
     }
 
     NV_ENC_INITIALIZE_PARAMS ip = {};
@@ -102,6 +128,15 @@ bool NvencEncoder::Init(ID3D11Device* device, const EncoderConfig& cfg, std::str
     if (st != NV_ENC_SUCCESS && conf.frameIntervalP > 1) {
         // Turing/Ampere differ on B-frame support depending on codec; retry flat.
         conf.frameIntervalP = 1;
+        st = fn_.nvEncInitializeEncoder(session_, &ip);
+    }
+    if (st != NV_ENC_SUCCESS && conf.rcParams.enableLookahead) {
+        // Lookahead is rejected on some driver/codec combinations; retry without.
+        conf.rcParams.enableLookahead = 0;
+        st = fn_.nvEncInitializeEncoder(session_, &ip);
+    }
+    if (st != NV_ENC_SUCCESS && conf.rcParams.multiPass) {
+        conf.rcParams.multiPass = NV_ENC_MULTI_PASS_DISABLED;
         st = fn_.nvEncInitializeEncoder(session_, &ip);
     }
     if (st != NV_ENC_SUCCESS) {

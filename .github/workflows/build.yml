@@ -21,7 +21,7 @@ jobs:
         run: ./tools/fetch-deps.ps1
 
       - name: Configure
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+        run: cmake -S . -B build -A x64
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -33,7 +33,7 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item "$r/ulticast.exe","$r/ulticast-ui.exe" dist
           Copy-Item "$r/*.dll" dist
-          Copy-Item "$r/*.pak","$r/*.bin","$r/icudtl.dat" dist
+          Copy-Item "$r/*.pak","$r/*.bin","$r/icudtl.dat" dist -ErrorAction SilentlyContinue
           Copy-Item "$r/locales" dist -Recurse
           Copy-Item "THIRD_PARTY_NOTICES.md" dist
           Get-ChildItem dist | Select-Object Name,Length | Format-Table -AutoSize
@@ -43,7 +43,12 @@ jobs:
         shell: pwsh
         run: |
           $ver = "${{ github.ref_name }}".TrimStart('v')
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=$ver" "installer\ulticast.iss"
+          $iscc = @(
+            "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+            "C:\Program Files\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw "Inno Setup not found on this runner" }
+          & $iscc "/DAppVersion=$ver" "installer\ulticast.iss"
 
       - name: Package portable zip
         shell: pwsh

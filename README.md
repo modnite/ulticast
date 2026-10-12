@@ -110,7 +110,7 @@ the vendored dependencies.
 git clone https://github.com/modnite/ulticast.git
 cd ulticast
 powershell -ExecutionPolicy Bypass -File tools\fetch-deps.ps1
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake -S . -B build -A x64
 cmake --build build --config Release --parallel
 ```
 

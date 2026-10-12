@@ -60,24 +60,31 @@ Please attach `diagnostics-*.txt` and the newest log to
 - **Stage 3** DXGI backend, scene compositor, webcam overlay, replay buffer, hotkeys — done, verified
 - **Stage 4** UI (Direct2D, tray, settings, dual output) — done, verified, polished
 - **Stage 5** chroma key + **browser overlays (CEF offscreen rendering)** + **DXGI cursor compositing** — done, verified
+- **Stage 6** multi-scene / multi-source engine (live scene switching) + two-page UI redesign — done, verified
 - Next: on-hardware validation on the RTX 3080 rig
 
 ## The UI (Ulticast-ui.exe)
 
-Dark theme, custom-drawn controls, live scene preview, and everything the engine can do:
+Dark theme, custom-drawn controls, and a two-page layout: **Live** (scenes, preview, transport) and
+**Setup** (devices and encoding), so nothing gets in the way while recording.
 
 | Area | Controls |
 |---|---|
+| Scenes | scene list (up to 6), switch live mid-recording, rename, add/remove |
+| Sources | per-scene toggles: **Game Capture**, **Webcam** (+ PiP corner), **Browser Overlay**, **Show Cursor** |
+| Preview | live scene, centered "NO SIGNAL" placeholder, compact stats (elapsed, fps, Mbps, backend, resolution, devices) |
+| Transport | Start/Stop, Pause/Resume, Snap Clip, Open Logs, Report Bug, Open Folder |
 | Source | monitor picker, window picker (refreshed on open), capture backend (auto / WGC / DXGI), fps |
-| Camera & audio | webcam toggle + device, desktop loopback toggle, mic toggle + device, **chroma key toggle + color + PiP corner** |
+| Camera & audio | webcam device, desktop loopback toggle, mic toggle + device, **chroma key toggle + color** |
 | Video | HEVC / H.264, NVENC preset P1–P7, CQ slider 16–30 |
 | Output | **Record to file** toggle + path + Browse, **Go Live** toggle + platform + stream key |
 | Clips | replay toggle + buffer length, Snap Clip (F9 global hotkey) |
-| Overlay | browser overlay toggle + HTML file / https:// URL (alerts, chat widgets, custom HTML) |
-| Transport | Start/Stop, Pause/Resume, Snap Clip, Open Folder |
+| Overlay | browser overlay HTML file / https:// URL (alerts, chat widgets, custom HTML) |
+| Troubleshooting | Open Logs, Report Bug, Open Folder |
 | Activity strip | live engine messages (device init, file path, warnings, errors) |
-| Preview | live scene with resolution/fps overlay and pulsing REC dot |
 
+- **Scenes**: each scene is a named set of sources; switching applies instantly while recording
+  (no restart) — toggle layers on/off or change the webcam corner live. Scenes persist in settings.
 - **Dual output**: record to disk *and* stream at the same time (separate NVENC sessions).
 - **Live stats**: elapsed time, frames, fps, throughput, active devices, backend, resolution.
 - **Tray icon**: closing the window hides it; the tray menu can Start/Stop/Pause/Snap/Exit.

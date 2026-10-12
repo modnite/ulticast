@@ -104,23 +104,35 @@ if (Test-Path $overlay) {
 }
 
 # --------------------------------------------------------------- 7. cursor
-# Note: this harness's SetCursorPos is DPI-virtualized, so probe a small
-# neighborhood for the arrow instead of an exact pixel.
+# Park the cursor, then capture the same desktop with and without cursor
+# compositing. The arrow is the only difference between the two frames, so a
+# cluster of differing pixels near the parked position proves it was drawn.
+# (Probing for white pixels is fragile: SetCursorPos is DPI-virtualized, so the
+# pointer can land tens of pixels from the requested spot.)
 [Smoke]::SetCursorPos(600, 400) | Out-Null
 Start-Sleep -Milliseconds 300
 & $exe --backend dxgi --monitor 0 --seconds 4 --out "$t\cursor.mkv" 2>&1 | Out-Null
-if (ExtractFrame "$t\cursor.mkv" 2 "$t\cursor.png") {
-    $bmp = New-Object System.Drawing.Bitmap "$t\cursor.png"
+& $exe --backend dxgi --monitor 0 --seconds 4 --no-cursor --out "$t\nocursor.mkv" 2>&1 | Out-Null
+if ((ExtractFrame "$t\cursor.mkv" 2 "$t\cursor.png") -and
+    (ExtractFrame "$t\nocursor.mkv" 2 "$t\nocursor.png")) {
+    $a = New-Object System.Drawing.Bitmap "$t\cursor.png"
+    $b = New-Object System.Drawing.Bitmap "$t\nocursor.png"
     $found = $false
-    for ($y = 395; $y -le 425 -and -not $found; $y += 2) {
-        for ($x = 590; $x -le 625 -and -not $found; $x += 2) {
-            $p = $bmp.GetPixel($x, $y)
-            if (($p.R -gt 200) -and ($p.G -gt 200) -and ($p.B -gt 200)) { $found = $true }
+    $diff = 0
+    for ($y = 330; $y -le 470 -and -not $found; $y++) {
+        for ($x = 530; $x -le 670 -and -not $found; $x++) {
+            $pa = $a.GetPixel($x, $y)
+            $pb = $b.GetPixel($x, $y)
+            $d = [Math]::Abs($pa.R - $pb.R) + [Math]::Abs($pa.G - $pb.G) + [Math]::Abs($pa.B - $pb.B)
+            if ($d -gt 90) {
+                $diff++
+                if ($diff -ge 30) { $found = $true }   # an arrow is hundreds of pixels
+            }
         }
     }
-    $far = $bmp.GetPixel(540, 360)
-    $bmp.Dispose()
-    Check 'dxgi cursor: arrow composited near the parked position' $found "far=$far"
+    $a.Dispose()
+    $b.Dispose()
+    Check 'dxgi cursor: arrow composited near the parked position' $found "diffpixels=$diff"
 } else {
     Check 'dxgi cursor: arrow composited near the parked position' $false 'frame extraction failed'
 }

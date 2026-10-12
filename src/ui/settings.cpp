@@ -141,6 +141,46 @@ bool LoadUiSettings(UiSettings* s) {
         else if (key == "browser") s->browser = (val == "1");
         else if (key == "browserUrl") s->browserUrl = val;
         else if (key == "hotkey") s->hotkey = atoi(val.c_str());
+        else if (key == "activeScene") s->activeScene = atoi(val.c_str());
+        else if (key.rfind("scene", 0) == 0 && key.size() > 5 &&
+                 isdigit((unsigned char)key[5])) {
+            const int idx = atoi(key.c_str() + 5);
+            if (idx >= 0 && idx < 16) {
+                // name|capture|webcam|browser|cursor|corner
+                std::vector<std::string> parts;
+                size_t start = 0;
+                while (true) {
+                    size_t bar = val.find('|', start);
+                    if (bar == std::string::npos) {
+                        parts.push_back(val.substr(start));
+                        break;
+                    }
+                    parts.push_back(val.substr(start, bar - start));
+                    start = bar + 1;
+                }
+                while (parts.size() < 6) parts.push_back("0");
+                UiSceneSetting sc;
+                sc.name = parts[0].empty() ? "Scene" : parts[0];
+                sc.capture = parts[1] == "0" ? 0 : 1;
+                sc.webcam = parts[2] == "1" ? 1 : 0;
+                sc.browser = parts[3] == "1" ? 1 : 0;
+                sc.cursor = parts[4] == "0" ? 0 : 1;
+                sc.corner = atoi(parts[5].c_str());
+                if (sc.corner < 0 || sc.corner > 3) sc.corner = 3;
+                if ((int)s->scenes.size() <= idx) s->scenes.resize(idx + 1);
+                s->scenes[idx] = sc;
+            }
+        }
+    }
+
+    if (s->scenes.empty()) {
+        // First run (or an upgrade from the single-scene builds): seed one scene,
+        // carrying over the old global webcam/browser toggles.
+        UiSceneSetting sc;
+        sc.name = "Game";
+        sc.webcam = s->webcam ? 1 : 0;
+        sc.browser = s->browser ? 1 : 0;
+        s->scenes.push_back(sc);
     }
     return true;
 }
@@ -184,5 +224,16 @@ bool SaveUiSettings(const UiSettings& s) {
     f << "browser=" << (s.browser ? 1 : 0) << "\n";
     f << "browserUrl=" << s.browserUrl << "\n";
     f << "hotkey=" << s.hotkey << "\n";
+    f << "activeScene=" << s.activeScene << "\n";
+    f << "sceneCount=" << s.scenes.size() << "\n";
+    for (size_t i = 0; i < s.scenes.size(); ++i) {
+        const UiSceneSetting& sc = s.scenes[i];
+        std::string name = sc.name;
+        for (char& c : name)
+            if (c == '|' || c == '\n' || c == '\r') c = ' ';
+        f << "scene" << i << "=" << name << "|" << (sc.capture ? 1 : 0) << "|"
+          << (sc.webcam ? 1 : 0) << "|" << (sc.browser ? 1 : 0) << "|" << (sc.cursor ? 1 : 0)
+          << "|" << sc.corner << "\n";
+    }
     return true;
 }

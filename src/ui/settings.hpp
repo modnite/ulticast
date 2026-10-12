@@ -1,6 +1,17 @@
 #pragma once
 #include <string>
+#include <vector>
 #include <windows.h>
+
+// One scene: a named source layout the user can switch between.
+struct UiSceneSetting {
+    std::string name = "Scene";
+    int capture = 1;
+    int webcam = 0;
+    int browser = 0;
+    int cursor = 1;
+    int corner = 3;  // webcam position preset index
+};
 
 // Persisted UI settings. The stream key is stored DPAPI-encrypted (per user).
 struct UiSettings {
@@ -39,6 +50,10 @@ struct UiSettings {
 
     bool browser = false;
     std::string browserUrl;
+
+    // Scenes: source layouts the user switches between. Always at least one.
+    std::vector<UiSceneSetting> scenes;
+    int activeScene = 0;
 
     int hotkey = VK_F9;
 };

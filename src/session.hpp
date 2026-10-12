@@ -22,6 +22,16 @@
 #include "core/replay_buffer.hpp"
 #include "core/webcam_mf.hpp"
 
+// A source placed in the scene, in canvas pixels. w/h == 0 means "use the
+// source's default size" (full canvas for capture/browser, PiP for webcam).
+enum class SessionSourceType { Capture, Webcam, Browser };
+
+struct SessionSource {
+    SessionSourceType type = SessionSourceType::Capture;
+    bool enabled = true;
+    int x = 0, y = 0, w = 0, h = 0;
+};
+
 // Everything a run needs. The UI fills this from its widgets; the CLI from flags.
 struct SessionConfig {
     // capture
@@ -72,6 +82,10 @@ struct SessionConfig {
     int browserHeight = 0;
 
     bool showCursor = true;      // DXGI duplication cursor compositing
+
+    // Scene: ordered sources. Empty -> a default scene is built from the
+    // webcam/browser flags above (keeps the CLI behaviour).
+    std::vector<SessionSource> sources;
 };
 
 // One run of the capture pipeline: capture -> compositor -> encoders -> outputs.
@@ -96,6 +110,7 @@ public:
         uint32_t width = 0, height = 0;
         uint64_t dxgiPointer = 0, dxgiShapes = 0;
         std::wstring desktopDevice, micDevice, webcamName;
+        bool browserActive = false;
     };
 
     Session() = default;
@@ -109,6 +124,11 @@ public:
     bool Paused() const { return paused_.load(); }
     bool SaveClip();  // false if replay disabled or a save is already running
     Stats GetStats() const;
+
+    // Live scene updates, safe to call while running (UI scene switching).
+    // webcamPos applies to webcam sources that use the default PiP placement.
+    void SetSources(std::vector<SessionSource> sources, std::string webcamPos);
+    void SetCursorVisible(bool on) { showCursorLive_.store(on); }
 
     // Optional sink for engine messages (UI activity strip). Thread-safe usage
     // is the caller's responsibility; the UI wraps it in a mutex.
@@ -177,6 +197,12 @@ private:
     bool browserOn_ = false;
     std::atomic<bool> webcamActive_{false};
     float keyR_ = 0.f, keyG_ = 1.f, keyB_ = 0.f;
+
+    // Live scene state (guarded by sourcesMu_); OnFrame snapshots it per frame.
+    mutable std::mutex sourcesMu_;
+    std::vector<SessionSource> liveSources_;
+    std::string liveWebcamPos_ = "bottomright";
+    std::atomic<bool> showCursorLive_{true};
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> tex_;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv_;

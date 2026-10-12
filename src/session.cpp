@@ -77,6 +77,28 @@ bool Session::Start(const SessionConfig& cfg, std::string* err) {
 
     if (!d3d_.Create(err, cfg_.adapter)) return false;
 
+    if (cfg_.sources.empty()) {
+        SessionSource cap;
+        cap.type = SessionSourceType::Capture;
+        cfg_.sources.push_back(cap);
+        if (cfg_.webcam) {
+            SessionSource w;
+            w.type = SessionSourceType::Webcam;
+            cfg_.sources.push_back(w);
+        }
+        if (cfg_.browser) {
+            SessionSource b;
+            b.type = SessionSourceType::Browser;
+            cfg_.sources.push_back(b);
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lk(sourcesMu_);
+        liveSources_ = cfg_.sources;
+        liveWebcamPos_ = cfg_.webcamPos;
+    }
+    showCursorLive_.store(cfg_.showCursor);
+
     // Chroma key color (RRGGBB -> floats)
     keyR_ = 0.f;
     keyG_ = 1.f;
@@ -194,6 +216,12 @@ void Session::SetPaused(bool p) {
         forceIdrRec_ = true;
         forceIdrStr_ = true;
     }
+}
+
+void Session::SetSources(std::vector<SessionSource> sources, std::string webcamPos) {
+    std::lock_guard<std::mutex> lk(sourcesMu_);
+    liveSources_ = std::move(sources);
+    liveWebcamPos_ = std::move(webcamPos);
 }
 
 bool Session::SaveClip() {
@@ -469,7 +497,7 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
 
     // ---- scene ----
     d3d_.context->CopyResource(sceneTex_.Get(), src);
-    LayerDraw layers[4];
+    LayerDraw layers[8];
     int layerCount = 0;
     auto applyKey = [&](LayerDraw& l) {
         l.key = true;
@@ -477,113 +505,144 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
         l.keyG = keyG_;
         l.keyB = keyB_;
     };
+    auto pushLayer = [&](ID3D11ShaderResourceView* srv, float x, float y, float w, float h) {
+        if (layerCount < 8) layers[layerCount++] = {srv, x, y, w, h, 1.0f};
+    };
+    const float canvasW = (float)width_.load();
+    const float canvasH = (float)height_.load();
 
-    layers[layerCount] = {sceneSrv_.Get(), 0.f, 0.f, (float)width_.load(), (float)height_.load(),
-                          1.0f};
-    if (cfg_.chroma && cfg_.chromaLayer == 1) applyKey(layers[layerCount]);
-    layerCount++;
-
-    if (webcamOn_) {
-        std::vector<uint8_t> camBuf;
-        uint32_t cw = 0, ch = 0;
-        uint64_t cno = 0;
-        if (webcam_.GetLatest(&camBuf, &cw, &ch, &cno)) {
-            if (!webcamTex_ || webcamW_ != cw || webcamH_ != ch) {
-                webcamW_ = cw;
-                webcamH_ = ch;
-                D3D11_TEXTURE2D_DESC wd = {};
-                wd.Width = cw;
-                wd.Height = ch;
-                wd.MipLevels = 1;
-                wd.ArraySize = 1;
-                wd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-                wd.SampleDesc = {1, 0};
-                wd.Usage = D3D11_USAGE_DYNAMIC;
-                wd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-                wd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-                webcamTex_.Reset();
-                if (SUCCEEDED(d3d_.device->CreateTexture2D(&wd, nullptr,
-                                                           webcamTex_.GetAddressOf()))) {
-                    webcamSrv_ = Compositor::CreateSrv(d3d_.device.Get(), webcamTex_.Get());
-                    const int targetW = cfg_.webcamWidth > 0 ? cfg_.webcamWidth : (int)width_ / 4;
-                    camW_ = (float)targetW;
-                    camH_ = (float)targetW * (float)ch / (float)cw;
-                    const float margin = 16.f;
-                    const bool left = cfg_.webcamPos == "topleft" ||
-                                      cfg_.webcamPos == "bottomleft";
-                    const bool top = cfg_.webcamPos == "topleft" || cfg_.webcamPos == "topright";
-                    camX_ = left ? margin : (float)width_ - camW_ - margin;
-                    camY_ = top ? margin : (float)height_ - camH_ - margin;
-                }
-            }
-            if (webcamTex_) {
-                D3D11_MAPPED_SUBRESOURCE map{};
-                if (SUCCEEDED(d3d_.context->Map(webcamTex_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
-                                                &map))) {
-                    const size_t rowBytes = (size_t)cw * 4;
-                    for (uint32_t y = 0; y < ch; ++y)
-                        memcpy((uint8_t*)map.pData + (size_t)y * map.RowPitch,
-                               camBuf.data() + (size_t)y * rowBytes, rowBytes);
-                    d3d_.context->Unmap(webcamTex_.Get(), 0);
-                }
-            }
-        }
-        if (webcamSrv_ && camW_ > 0) {
-            layers[layerCount] = {webcamSrv_.Get(), camX_, camY_, camW_, camH_, 1.0f};
-            if (cfg_.chroma && cfg_.chromaLayer == 0) applyKey(layers[layerCount]);
-            layerCount++;
-        }
+    std::vector<SessionSource> sources;
+    std::string webcamPos;
+    {
+        std::lock_guard<std::mutex> lk(sourcesMu_);
+        sources = liveSources_;
+        webcamPos = liveWebcamPos_;
     }
 
-    // ---- browser overlay (topmost, alpha-blended) ----
-    if (browserOn_) {
-        std::vector<uint8_t> frame;
-        uint32_t bw = 0, bh = 0;
-        uint64_t bno = 0;
-        if (browser_.GetLatest(&frame, &bw, &bh, &bno)) {
-            if (!browserTex_ || browserW_ != bw || browserH_ != bh) {
-                browserW_ = bw;
-                browserH_ = bh;
-                D3D11_TEXTURE2D_DESC bd = {};
-                bd.Width = bw;
-                bd.Height = bh;
-                bd.MipLevels = 1;
-                bd.ArraySize = 1;
-                bd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-                bd.SampleDesc = {1, 0};
-                bd.Usage = D3D11_USAGE_DYNAMIC;
-                bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-                bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-                browserTex_.Reset();
-                if (SUCCEEDED(d3d_.device->CreateTexture2D(&bd, nullptr,
-                                                           browserTex_.GetAddressOf()))) {
-                    browserSrv_ = Compositor::CreateSrv(d3d_.device.Get(), browserTex_.Get());
+    for (const auto& s : sources) {
+        if (!s.enabled || layerCount >= 8) continue;
+
+        if (s.type == SessionSourceType::Capture) {
+            const float w = (float)(s.w > 0 ? s.w : (int)canvasW);
+            const float h = (float)(s.h > 0 ? s.h : (int)canvasH);
+            pushLayer(sceneSrv_.Get(), (float)s.x, (float)s.y, w, h);
+            if (cfg_.chroma && cfg_.chromaLayer == 1) applyKey(layers[layerCount - 1]);
+        } else if (s.type == SessionSourceType::Webcam) {
+            if (!webcamOn_) continue;
+            std::vector<uint8_t> camBuf;
+            uint32_t cw = 0, ch = 0;
+            uint64_t cno = 0;
+            if (webcam_.GetLatest(&camBuf, &cw, &ch, &cno)) {
+                if (!webcamTex_ || webcamW_ != cw || webcamH_ != ch) {
+                    webcamW_ = cw;
+                    webcamH_ = ch;
+                    D3D11_TEXTURE2D_DESC wd = {};
+                    wd.Width = cw;
+                    wd.Height = ch;
+                    wd.MipLevels = 1;
+                    wd.ArraySize = 1;
+                    wd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                    wd.SampleDesc = {1, 0};
+                    wd.Usage = D3D11_USAGE_DYNAMIC;
+                    wd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                    wd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+                    webcamTex_.Reset();
+                    if (SUCCEEDED(d3d_.device->CreateTexture2D(&wd, nullptr,
+                                                               webcamTex_.GetAddressOf()))) {
+                        webcamSrv_ = Compositor::CreateSrv(d3d_.device.Get(), webcamTex_.Get());
+                        const int targetW = cfg_.webcamWidth > 0 ? cfg_.webcamWidth : (int)canvasW / 4;
+                        camW_ = (float)targetW;
+                        camH_ = (float)targetW * (float)ch / (float)cw;
+                        const float margin = 16.f;
+                        const bool left =
+                            cfg_.webcamPos == "topleft" || cfg_.webcamPos == "bottomleft";
+                        const bool top =
+                            cfg_.webcamPos == "topleft" || cfg_.webcamPos == "topright";
+                        camX_ = left ? margin : canvasW - camW_ - margin;
+                        camY_ = top ? margin : canvasH - camH_ - margin;
+                    }
+                }
+                if (webcamTex_) {
+                    D3D11_MAPPED_SUBRESOURCE map{};
+                    if (SUCCEEDED(d3d_.context->Map(webcamTex_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
+                                                    &map))) {
+                        const size_t rowBytes = (size_t)cw * 4;
+                        for (uint32_t y = 0; y < ch; ++y)
+                            memcpy((uint8_t*)map.pData + (size_t)y * map.RowPitch,
+                                   camBuf.data() + (size_t)y * rowBytes, rowBytes);
+                        d3d_.context->Unmap(webcamTex_.Get(), 0);
+                    }
                 }
             }
-            if (browserTex_) {
-                D3D11_MAPPED_SUBRESOURCE map{};
-                if (SUCCEEDED(d3d_.context->Map(browserTex_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
-                                                &map))) {
-                    const size_t rowBytes = (size_t)bw * 4;
-                    for (uint32_t y = 0; y < bh; ++y)
-                        memcpy((uint8_t*)map.pData + (size_t)y * map.RowPitch,
-                               frame.data() + (size_t)y * rowBytes, rowBytes);
-                    d3d_.context->Unmap(browserTex_.Get(), 0);
+            if (webcamSrv_ && camW_ > 0) {
+                float x, y, w, h;
+                if (s.w > 0) {
+                    x = (float)s.x;
+                    y = (float)s.y;
+                    w = (float)s.w;
+                    h = (float)s.h;
+                } else {
+                    const float margin = 16.f;
+                    const bool left = webcamPos == "topleft" || webcamPos == "bottomleft";
+                    const bool top = webcamPos == "topleft" || webcamPos == "topright";
+                    w = camW_;
+                    h = camH_;
+                    x = left ? margin : canvasW - w - margin;
+                    y = top ? margin : canvasH - h - margin;
                 }
+                pushLayer(webcamSrv_.Get(), x, y, w, h);
+                if (cfg_.chroma && cfg_.chromaLayer == 0) applyKey(layers[layerCount - 1]);
             }
-            browserFrameNo_ = bno;
-        }
-        if (browserSrv_ && browserW_ > 0) {
-            layers[layerCount] = {browserSrv_.Get(), 0.f, 0.f, (float)width_.load(),
-                                  (float)height_.load(), 1.0f};
-            layers[layerCount].useAlpha = true;
-            layers[layerCount].premultiplied = true;  // CEF OSR paints premultiplied BGRA
-            layerCount++;
+        } else if (s.type == SessionSourceType::Browser) {
+            if (!browserOn_) continue;
+            std::vector<uint8_t> frame;
+            uint32_t bw = 0, bh = 0;
+            uint64_t bno = 0;
+            if (browser_.GetLatest(&frame, &bw, &bh, &bno)) {
+                if (!browserTex_ || browserW_ != bw || browserH_ != bh) {
+                    browserW_ = bw;
+                    browserH_ = bh;
+                    D3D11_TEXTURE2D_DESC bd = {};
+                    bd.Width = bw;
+                    bd.Height = bh;
+                    bd.MipLevels = 1;
+                    bd.ArraySize = 1;
+                    bd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                    bd.SampleDesc = {1, 0};
+                    bd.Usage = D3D11_USAGE_DYNAMIC;
+                    bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+                    browserTex_.Reset();
+                    if (SUCCEEDED(d3d_.device->CreateTexture2D(&bd, nullptr,
+                                                               browserTex_.GetAddressOf()))) {
+                        browserSrv_ = Compositor::CreateSrv(d3d_.device.Get(), browserTex_.Get());
+                    }
+                }
+                if (browserTex_) {
+                    D3D11_MAPPED_SUBRESOURCE map{};
+                    if (SUCCEEDED(d3d_.context->Map(browserTex_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
+                                                    &map))) {
+                        const size_t rowBytes = (size_t)bw * 4;
+                        for (uint32_t y = 0; y < bh; ++y)
+                            memcpy((uint8_t*)map.pData + (size_t)y * map.RowPitch,
+                                   frame.data() + (size_t)y * rowBytes, rowBytes);
+                        d3d_.context->Unmap(browserTex_.Get(), 0);
+                    }
+                }
+                browserFrameNo_ = bno;
+            }
+            if (browserSrv_ && browserW_ > 0) {
+                const float w = (float)(s.w > 0 ? s.w : (int)canvasW);
+                const float h = (float)(s.h > 0 ? s.h : (int)canvasH);
+                pushLayer(browserSrv_.Get(), (float)s.x, (float)s.y, w, h);
+                layers[layerCount - 1].useAlpha = true;
+                layers[layerCount - 1].premultiplied = true;  // CEF OSR paints premultiplied BGRA
+            }
         }
     }
 
     // ---- hardware cursor (DXGI duplication reports it separately) ----
-    if (usingDxgi_.load() && cfg_.showCursor) {
+    if (usingDxgi_.load() && showCursorLive_.load()) {
         CURSORINFO ci{};
         ci.cbSize = sizeof(ci);
         BOOL gotInfo = GetCursorInfo(&ci);
@@ -866,5 +925,6 @@ Session::Stats Session::GetStats() const {    Stats st;
     st.desktopDevice = mixer_.DesktopName();
     st.micDevice = mixer_.MicName();
     st.webcamName = webcamOn_ ? webcam_.ActiveDevice() : L"";
+    st.browserActive = browserOn_ && browserW_ > 0;
     return st;
 }

@@ -96,6 +96,101 @@ static void Trim(std::string& s) {
         s.erase(0, start);
 }
 
+// ---- scene serialization ---------------------------------------------------
+// v2: "v2|<name>|<cursor>|<src>;<src>;..."
+//     src = type:enabled:device:monitor:window:dxgi:corner:camX:camY
+// ';', ':' and '|' inside values are stored as spaces (device names and window
+// titles are match substrings, so this is lossless in practice).
+// v1 (legacy): "<name>|<capture>|<webcam>|<browser>|<cursor>|<corner>|..."
+
+static std::vector<std::string> SplitStr(const std::string& s, char sep) {
+    std::vector<std::string> out;
+    size_t start = 0;
+    while (true) {
+        size_t p = s.find(sep, start);
+        if (p == std::string::npos) {
+            out.push_back(s.substr(start));
+            break;
+        }
+        out.push_back(s.substr(start, p - start));
+        start = p + 1;
+    }
+    return out;
+}
+
+static std::string Sanitize(const std::string& s) {
+    std::string o = s;
+    for (char& c : o)
+        if (c == ':' || c == ';' || c == '|' || c == '\n' || c == '\r') c = ' ';
+    return o;
+}
+
+static std::string EncodeSource(const UiSourceSetting& s) {
+    // type:device:enabled:monitor:window:dxgi:corner:camX:camY
+    char num[160];
+    sprintf_s(num, "%d:%d:%s:%d:%d:%.4f:%.4f", s.enabled ? 1 : 0, s.monitor,
+              Sanitize(s.window).c_str(), s.dxgi ? 1 : 0, s.corner, s.camX, s.camY);
+    return std::to_string(s.type) + ":" + Sanitize(s.device) + ":" + num;
+}
+
+static bool ParseScene(const std::string& val, UiSceneSetting* sc) {
+    std::vector<std::string> parts = SplitStr(val, '|');
+    if (!parts.empty() && parts[0] == "v2") {
+        if (parts.size() < 2) return false;
+        sc->name = parts[1].empty() ? "Scene" : parts[1];
+        sc->cursor = (parts.size() > 2 && parts[2] == "0") ? 0 : 1;
+        sc->sources.clear();
+        if (parts.size() > 3 && !parts[3].empty()) {
+            for (const std::string& item : SplitStr(parts[3], ';')) {
+                if (item.empty()) continue;
+                std::vector<std::string> f = SplitStr(item, ':');
+                if (f.size() < 3) continue;
+                UiSourceSetting src;
+                src.type = atoi(f[0].c_str());
+                if (src.type < 0 || src.type > 4) src.type = 0;
+                src.device = f[1];
+                src.enabled = f[2] == "0" ? 0 : 1;
+                if (f.size() > 3) src.monitor = atoi(f[3].c_str());
+                if (f.size() > 4) src.window = f[4];
+                // Heal files written by an earlier build whose encoder dropped
+                // the window field (a bare "0"/"1" is the dxgi flag, not a title).
+                if (src.window == "0" || src.window == "1") src.window.clear();
+                if (f.size() > 5) src.dxgi = f[5] == "1" ? 1 : 0;
+                if (f.size() > 6) src.corner = atoi(f[6].c_str());
+                if (f.size() > 7) src.camX = (float)atof(f[7].c_str());
+                if (f.size() > 8) src.camY = (float)atof(f[8].c_str());
+                if (src.corner < 0 || src.corner > 3) src.corner = 3;
+                sc->sources.push_back(src);
+            }
+        }
+        return true;
+    }
+    // legacy v1
+    while (parts.size() < 6) parts.push_back("0");
+    sc->name = parts[0].empty() ? "Scene" : parts[0];
+    sc->cursor = parts[4] == "0" ? 0 : 1;
+    sc->sources.clear();
+    UiSourceSetting cap;
+    cap.type = 0;
+    cap.enabled = parts[1] == "0" ? 0 : 1;
+    sc->sources.push_back(cap);
+    if (parts[2] == "1") {
+        UiSourceSetting v;
+        v.type = 1;
+        v.corner = atoi(parts[5].c_str());
+        if (v.corner < 0 || v.corner > 3) v.corner = 3;
+        if (parts.size() > 6) v.camX = (float)atof(parts[6].c_str());
+        if (parts.size() > 7) v.camY = (float)atof(parts[7].c_str());
+        sc->sources.push_back(v);
+    }
+    if (parts[3] == "1") {
+        UiSourceSetting b;
+        b.type = 2;
+        sc->sources.push_back(b);
+    }
+    return true;
+}
+
 bool LoadUiSettings(UiSettings* s) {
     if (s->recordPath.empty()) s->recordPath = DefaultRecordingPath();
 
@@ -141,6 +236,8 @@ bool LoadUiSettings(UiSettings* s) {
         else if (key == "recordPath") s->recordPath = val;
         else if (key == "stream") s->stream = (val == "1");
         else if (key == "streamBitrate") s->streamBitrate = (uint32_t)atoi(val.c_str());
+        else if (key == "streamHevc") s->streamHevc = (val == "1");
+        else if (key == "streamReconnect") s->streamReconnect = atoi(val.c_str());
         else if (key == "platform") s->platform = val;
         else if (key == "streamKeyEnc") s->streamKey = UnprotectKey(val);
         else if (key == "customUrl") s->customUrl = val;
@@ -157,29 +254,8 @@ bool LoadUiSettings(UiSettings* s) {
                  isdigit((unsigned char)key[5])) {
             const int idx = atoi(key.c_str() + 5);
             if (idx >= 0 && idx < 16) {
-                // name|capture|webcam|browser|cursor|corner
-                std::vector<std::string> parts;
-                size_t start = 0;
-                while (true) {
-                    size_t bar = val.find('|', start);
-                    if (bar == std::string::npos) {
-                        parts.push_back(val.substr(start));
-                        break;
-                    }
-                    parts.push_back(val.substr(start, bar - start));
-                    start = bar + 1;
-                }
-                while (parts.size() < 6) parts.push_back("0");
                 UiSceneSetting sc;
-                sc.name = parts[0].empty() ? "Scene" : parts[0];
-                sc.capture = parts[1] == "0" ? 0 : 1;
-                sc.webcam = parts[2] == "1" ? 1 : 0;
-                sc.browser = parts[3] == "1" ? 1 : 0;
-                sc.cursor = parts[4] == "0" ? 0 : 1;
-                sc.corner = atoi(parts[5].c_str());
-                if (sc.corner < 0 || sc.corner > 3) sc.corner = 3;
-                if (parts.size() > 6) sc.camX = (float)atof(parts[6].c_str());
-                if (parts.size() > 7) sc.camY = (float)atof(parts[7].c_str());
+                if (!ParseScene(val, &sc)) sc.name = "Scene";
                 if ((int)s->scenes.size() <= idx) s->scenes.resize(idx + 1);
                 s->scenes[idx] = sc;
             }
@@ -187,12 +263,34 @@ bool LoadUiSettings(UiSettings* s) {
     }
 
     if (s->scenes.empty()) {
-        // First run (or an upgrade from the single-scene builds): seed one scene,
-        // carrying over the old global webcam/browser toggles.
+        // First run (or an upgrade from older builds): seed one scene and carry
+        // the old global toggles over into sources.
         UiSceneSetting sc;
         sc.name = "Game";
-        sc.webcam = s->webcam ? 1 : 0;
-        sc.browser = s->browser ? 1 : 0;
+        UiSourceSetting cap;
+        cap.type = 0;
+        sc.sources.push_back(cap);
+        if (s->webcam) {
+            UiSourceSetting v;
+            v.type = 1;
+            sc.sources.push_back(v);
+        }
+        if (s->browser) {
+            UiSourceSetting b;
+            b.type = 2;
+            sc.sources.push_back(b);
+        }
+        UiSourceSetting ao;
+        ao.type = 4;
+        ao.enabled = s->desktopAudio ? 1 : 0;
+        ao.device = s->desktopDevice;
+        sc.sources.push_back(ao);
+        if (s->mic) {
+            UiSourceSetting ai;
+            ai.type = 3;
+            ai.device = s->micDevice;
+            sc.sources.push_back(ai);
+        }
         s->scenes.push_back(sc);
     }
     return true;
@@ -237,6 +335,8 @@ bool SaveUiSettings(const UiSettings& s) {
     f << "recordPath=" << s.recordPath << "\n";
     f << "stream=" << (s.stream ? 1 : 0) << "\n";
     f << "streamBitrate=" << s.streamBitrate << "\n";
+    f << "streamHevc=" << (s.streamHevc ? 1 : 0) << "\n";
+    f << "streamReconnect=" << s.streamReconnect << "\n";
     f << "platform=" << s.platform << "\n";
     f << "streamKeyEnc=" << encrypted << "\n";
     f << "customUrl=" << s.customUrl << "\n";
@@ -252,12 +352,12 @@ bool SaveUiSettings(const UiSettings& s) {
     f << "sceneCount=" << s.scenes.size() << "\n";
     for (size_t i = 0; i < s.scenes.size(); ++i) {
         const UiSceneSetting& sc = s.scenes[i];
-        std::string name = sc.name;
-        for (char& c : name)
-            if (c == '|' || c == '\n' || c == '\r') c = ' ';
-        f << "scene" << i << "=" << name << "|" << (sc.capture ? 1 : 0) << "|"
-          << (sc.webcam ? 1 : 0) << "|" << (sc.browser ? 1 : 0) << "|" << (sc.cursor ? 1 : 0)
-          << "|" << sc.corner << "|" << sc.camX << "|" << sc.camY << "\n";
+        std::string line = "v2|" + Sanitize(sc.name) + "|" + (sc.cursor ? "1" : "0") + "|";
+        for (size_t k = 0; k < sc.sources.size(); ++k) {
+            if (k) line += ';';
+            line += EncodeSource(sc.sources[k]);
+        }
+        f << "scene" << i << "=" << line << "\n";
     }
     return true;
 }

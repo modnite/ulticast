@@ -33,9 +33,11 @@ Everything needed for a good report is built in:
 Please attach `diagnostics-*.txt` and the newest log to
 [the bug report form](https://github.com/modnite/ulticast/issues/new?template=bug_report.yml).
 
-![Ulticast UI — idle preview](test/ui_final_idle.png)
+![Ulticast UI — record](test/ui_final_idle.png)
 
-![Ulticast UI — setup](test/ui_final_setup.png)
+![Ulticast UI — stream](test/ui_final_stream.png)
+
+![Ulticast UI — settings](test/ui_final_setup.png)
 
 ## Architecture
 
@@ -69,41 +71,45 @@ Please attach `diagnostics-*.txt` and the newest log to
   drag, close-to-tray, start-menu shortcut option — done, verified
 - **Stage 8** installer/UX hardening: installer force-closes any running instance (incl. tray-hidden
   UI and CEF helpers), single-instance app guard, carded Setup layout with proper control spacing — done, verified
+- **Stage 9** Record / Stream / Settings surfaces with per-mode settings, independent runtime outputs
+  (start recording and go live separately, no interruption), expanded source list (display / window /
+  game / video devices incl. capture cards / mic / desktop audio / browser), per-scene sources with
+  live add/configure/remove — done, verified
 - Next: on-hardware validation on the RTX 3080 rig
 
 ## The UI (Ulticast-ui.exe)
 
-Dark theme, custom-drawn controls, and a two-page layout: **Live** (scenes, preview, transport) and
-**Setup** (devices and encoding), so nothing gets in the way while recording.
+Dark theme, custom-drawn controls, and **three surfaces**: **Record**, **Stream** and **Settings** —
+each mode has its own layout, its own big action button and its own settings, so nothing is crammed
+together (the same separation ShadowPlay/OBS users expect).
 
-| Area | Controls |
+| Surface | Contents |
 |---|---|
-| Scenes | scene list (up to 6), switch live mid-recording, rename, add/remove |
-| Sources | per-scene toggles: **Game/Window Capture**, **Webcam**, **Browser Overlay**, **Show Cursor** — all apply live, no restart |
-| Preview | live scene even while idle (capture-only preview), drag the webcam PiP to move it, centered placeholder, stats pill (resolution, fps, dropped frames) |
-| Transport | Start/Stop, Pause/Resume, Snap Clip, Open Logs, Report Bug, Open Folder |
-| Source | monitor picker, **window picker** (refreshed on open, scrollable), capture backend (**WGC** default / DXGI for fullscreen games), fps, **GPU picker** (NVENC needs the NVIDIA card) |
-| Camera & audio | webcam device, desktop loopback toggle + **output device picker**, mic toggle + device, **mic/desktop gain sliders**, **chroma key toggle + color** |
-| Video | HEVC / H.264, NVENC preset P1–P7, **rate control: Quality (CQ 1–51) or CBR + bitrate**, **B-frames 0–4**, **lookahead**, **two-pass** |
-| Output | **Record to file** toggle + path + Browse, **Go Live** toggle + platform + **stream bitrate** + stream key |
-| Clips | replay toggle + buffer length, Snap Clip (F9 global hotkey) |
-| Overlay | browser overlay HTML file / https:// URL (alerts, chat widgets, custom HTML) |
-| Misc | **Idle preview** toggle, **Close to tray** toggle, Open Logs, Report Bug, Open Folder |
-| Activity strip | live engine messages (device init, file path, warnings, errors) |
+| **Record** | scenes + sources rail · live preview (stats overlaid) · **RECORDING** (path, container codec), **CLIPS** (replay toggle, buffer length, F9), **ENCODING** (CQ or CBR, preset, B-frames) · transport: **Start/Stop Recording**, Pause, Snap Clip, Open Folder |
+| **Stream** | scenes + sources rail · live preview · **PLATFORM** (Twitch / YouTube / Facebook / custom, stream key or RTMP URL, reconnect attempts) · **STREAM QUALITY** (bitrate, H.264/HEVC, preset) · transport: **Go Live / End Stream**, Pause, Snap Clip |
+| **Settings** | capture defaults (monitor, window, backend, fps, **GPU**), camera & audio defaults (devices, mic/desktop gain, chroma key), browser overlay URL, advanced encoder (lookahead, two-pass), behavior (idle preview, close to tray), troubleshooting, about |
 
-- **Scenes**: each scene is a named set of sources; switching applies instantly while recording
-  (no restart) — toggle layers on/off, change the webcam corner, or drag the webcam on the preview.
-  Scenes persist in settings.
-- **Idle preview**: while not recording, Ulticast captures and composites into the preview only —
-  no encoders, no files, and the camera stays free for OBS/NVIDIA Broadcast until you press Start.
-- **No implicit hooks**: the default backend is plain WGC desktop/window capture. DXGI duplication
-  (fullscreen games) is only used when you pick it explicitly.
-- **GPU picker**: auto-prefers the NVIDIA adapter so NVENC works on machines whose iGPU is adapter 0
-  (e.g. an Intel 13600K with a GeForce card).
-- **Dual output**: record to disk *and* stream at the same time (separate NVENC sessions).
-- **Live stats**: uptime, fps, throughput, backend, resolution, dropped frames, active devices.
-- **Tray icon**: the tray menu can Start/Stop/Pause/Snap/Exit; enable **Close to tray** if the X
-  button should keep recording in the background (default: X exits).
+**Sources** (per scene, OBS-style — add with **+ Add**, click a row to configure it):
+
+| Type | Tag | Options |
+|---|---|---|
+| Display Capture | DISP | monitor |
+| Window Capture | WIN | window picker (scrollable list) |
+| Game Capture | GAME | monitor + DXGI duplication (fullscreen games) |
+| Video Capture Device | VID | **any camera or capture card** — multiple devices can run at once, each with its own PiP corner or free position (drag it on the preview) |
+| Microphone | MIC | capture device |
+| Desktop Audio | SYS | output device (loopback) |
+| Browser Overlay | WEB | HTML file / https:// URL (set in Settings) |
+
+- **Independent outputs**: Start Recording and Go Live are separate actions; either can start the
+  session and the other can be switched on later without interrupting the first (recording and
+  streaming use separate NVENC sessions).
+- **Scenes**: each scene owns its source list; switching applies live while recording.
+- **Idle preview**: while not producing output, Ulticast composites the scene into the preview only —
+  the camera opens only when recording, streaming or the replay buffer is armed.
+- **Replay buffer**: toggle it in Record > CLIPS; Snap Clip (F9) saves the last moments.
+- **No implicit hooks**: WGC is the default; DXGI duplication is an explicit per-source choice.
+- **Dropped-frame + uptime indicators**, live activity strip, tray menu with the same actions.
 - **Settings** persist to `%APPDATA%\Ulticast\settings.ini`; the stream key is stored
   **DPAPI-encrypted** (per user, never plaintext).
 

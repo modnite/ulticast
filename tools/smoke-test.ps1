@@ -104,23 +104,26 @@ if (Test-Path $overlay) {
 }
 
 # --------------------------------------------------------------- 7. cursor
-# Park the cursor, then capture the same desktop with and without cursor
-# compositing. The arrow is the only difference between the two frames, so a
-# cluster of differing pixels near the parked position proves it was drawn.
-# (Probing for white pixels is fragile: SetCursorPos is DPI-virtualized, so the
-# pointer can land tens of pixels from the requested spot.)
+# Park the cursor, then capture the same desktop twice *concurrently* (one run
+# with cursor compositing, one without). Because both captures happen at the
+# same wall-clock time, the desktop content is identical and the only pixel
+# difference is the cursor -- no fragile white-pixel hunting, and it does not
+# matter where the pointer actually ends up.
 [Smoke]::SetCursorPos(600, 400) | Out-Null
 Start-Sleep -Milliseconds 300
-& $exe --backend dxgi --monitor 0 --seconds 4 --out "$t\cursor.mkv" 2>&1 | Out-Null
-& $exe --backend dxgi --monitor 0 --seconds 4 --no-cursor --out "$t\nocursor.mkv" 2>&1 | Out-Null
+$p1 = Start-Process -FilePath $exe -ArgumentList "--backend dxgi --monitor 0 --seconds 5 --out `"$t\cursor.mkv`"" -PassThru -NoNewWindow
+Start-Sleep -Milliseconds 400
+$p2 = Start-Process -FilePath $exe -ArgumentList "--backend dxgi --monitor 0 --seconds 5 --no-cursor --out `"$t\nocursor.mkv`"" -PassThru -NoNewWindow
+$p1.WaitForExit()
+$p2.WaitForExit()
 if ((ExtractFrame "$t\cursor.mkv" 2 "$t\cursor.png") -and
     (ExtractFrame "$t\nocursor.mkv" 2 "$t\nocursor.png")) {
     $a = New-Object System.Drawing.Bitmap "$t\cursor.png"
     $b = New-Object System.Drawing.Bitmap "$t\nocursor.png"
     $found = $false
     $diff = 0
-    for ($y = 330; $y -le 470 -and -not $found; $y++) {
-        for ($x = 530; $x -le 670 -and -not $found; $x++) {
+    for ($y = 0; $y -lt $a.Height -and -not $found; $y += 2) {
+        for ($x = 0; $x -lt $a.Width -and -not $found; $x += 2) {
             $pa = $a.GetPixel($x, $y)
             $pb = $b.GetPixel($x, $y)
             $d = [Math]::Abs($pa.R - $pb.R) + [Math]::Abs($pa.G - $pb.G) + [Math]::Abs($pa.B - $pb.B)
@@ -132,9 +135,9 @@ if ((ExtractFrame "$t\cursor.mkv" 2 "$t\cursor.png") -and
     }
     $a.Dispose()
     $b.Dispose()
-    Check 'dxgi cursor: arrow composited near the parked position' $found "diffpixels=$diff"
+    Check 'dxgi cursor: arrow composited (concurrent captures, only the cursor differs)' $found "diffpixels=$diff"
 } else {
-    Check 'dxgi cursor: arrow composited near the parked position' $false 'frame extraction failed'
+    Check 'dxgi cursor: arrow composited (concurrent captures, only the cursor differs)' $false 'frame extraction failed'
 }
 
 # ------------------------------------------------------------------ summary

@@ -2,6 +2,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -23,16 +24,23 @@
 #include "core/webcam_mf.hpp"
 
 // A source placed in the scene, in canvas pixels. w/h == 0 means "use the
-// source's default size" (full canvas for capture/browser, PiP for webcam).
-enum class SessionSourceType { Capture, Webcam, Browser };
+// source's default size" (full canvas for capture/browser, PiP for video).
+enum class SessionSourceType { Capture, Webcam, Browser, AudioIn, AudioOut };
 
 struct SessionSource {
     SessionSourceType type = SessionSourceType::Capture;
     bool enabled = true;
     int x = 0, y = 0, w = 0, h = 0;
-    // Optional fractional position (0..1 of the canvas) for the webcam PiP;
+    // Optional fractional position (0..1 of the canvas) for video PiPs;
     // -1 = use the corner preset. Used by drag-to-move on the UI preview.
     float xr = -1.f, yr = -1.f;
+    // Expanded settings (all optional; empty/0 = defaults):
+    std::string device;        // Video: capture-device name substring ("" = default)
+    int monitor = 0;           // Capture: monitor index for WGC/DXGI
+    std::wstring window;       // Capture: window title substring (non-empty = window capture)
+    bool dxgi = false;         // Capture: use DXGI duplication (fullscreen games)
+    int corner = 3;            // Video: PiP corner (0 TL, 1 TR, 2 BL, 3 BR)
+    std::wstring audioDevice;  // AudioIn/Out: device name substring ("" = default)
 };
 
 // Everything a run needs. The UI fills this from its widgets; the CLI from flags.
@@ -113,6 +121,9 @@ public:
         uint64_t failedFrames = 0;
         uint64_t dropped = 0;       // frames the encoder refused (visual drop indicator)
         uint64_t skippedPaused = 0;
+        bool recording = false;     // live output state (runtime switchable)
+        bool streaming = false;
+        bool replayArmed = false;
         double kbps = 0;
         int clipsSaved = 0;
         std::string backend;
@@ -135,9 +146,21 @@ public:
     Stats GetStats() const;
 
     // Live scene updates, safe to call while running (UI scene switching).
-    // webcamPos applies to webcam sources that use the default PiP placement.
+    // webcamPos applies to video sources that use the default PiP placement.
     void SetSources(std::vector<SessionSource> sources, std::string webcamPos);
     void SetCursorVisible(bool on) { showCursorLive_.store(on); }
+    // Mute/unmute the audio sources at runtime (scene audio sources).
+    void SetAudioSourcesLive(bool desktop, bool mic) { mixer_.SetLiveSources(desktop, mic); }
+
+    // Runtime output control (OBS-style separate buttons). Commands are queued
+    // and applied on the capture thread between frames, so they never race with
+    // OnFrame. Failures are logged; Stats reports the live state.
+    void EnableRecording(const std::string& path);
+    void DisableRecording();
+    void EnableStreaming(const std::string& url, uint32_t bitrateKbps);
+    void DisableStreaming();
+    void EnableReplay(int seconds, const std::string& prefix);
+    void DisableReplay();
 
     // Optional sink for engine messages (UI activity strip). Thread-safe usage
     // is the caller's responsibility; the UI wraps it in a mutex.
@@ -159,6 +182,23 @@ private:
     void Fail(const std::string& msg);
     void Log(const char* fmt, ...);
     double ElapsedSeconds() const;
+
+    // Runtime output commands (applied on the capture thread).
+    enum class OutCmdType { RecOn, RecOff, StrOn, StrOff, RepOn, RepOff };
+    struct OutCmd {
+        OutCmdType type = OutCmdType::RecOn;
+        std::string arg;      // path / url / prefix
+        uint32_t bitrate = 0;
+        int seconds = 30;
+    };
+    void ApplyOutputCommands();
+    bool BeginRecording(const std::string& path);
+    void EndRecording();
+    bool BeginStreaming(const std::string& url, uint32_t bitrateKbps);
+    void EndStreaming();
+    bool BeginReplay(int seconds, const std::string& prefix);
+    void EndReplay();
+    EncoderConfig MakeEncoderConfig(uint32_t w, uint32_t h) const;
 
     LogFn logFn_;
 
@@ -197,9 +237,21 @@ private:
     FfMuxer::Config recCfg_, strCfg_;
     Compositor compositor_;
     ReplayBuffer replay_;
-    WebcamCapture webcam_;
     BrowserOverlay browser_;
     AudioMixer mixer_;
+
+    // One entry per Video source (webcam, capture card, ...). Multiple devices
+    // can be composited at once; each owns its capture thread and texture.
+    struct VideoLayer {
+        std::unique_ptr<WebcamCapture> cam;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> tex;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+        uint32_t w = 0, h = 0;
+        std::string device;
+    };
+    std::vector<VideoLayer> videos_;
+    VideoLayer* FindVideo(const std::string& device);
+    void StartVideoSources();
 
     bool audioReady_ = false;
     bool webcamOn_ = false;
@@ -213,13 +265,19 @@ private:
     std::string liveWebcamPos_ = "bottomright";
     std::atomic<bool> showCursorLive_{true};
 
+    // Runtime outputs (capture thread owns the bases; UI thread only enqueues).
+    std::mutex cmdMu_;
+    std::deque<OutCmd> cmds_;
+    std::atomic<bool> recOn_{false}, strOn_{false};
+    int64_t recBaseFrames_ = 0, strBaseFrames_ = 0;
+    int64_t recBaseAudio_ = 0, strBaseAudio_ = 0;
+    std::atomic<int64_t> lastAudioPts_{0};
+
     Microsoft::WRL::ComPtr<ID3D11Texture2D> tex_;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv_;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> sceneSrv_, webcamSrv_;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> sceneTex_, webcamTex_;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> sceneSrv_;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> sceneTex_;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> previewTex_;
-    uint32_t webcamW_ = 0, webcamH_ = 0;
-    float camX_ = 0, camY_ = 0, camW_ = 0, camH_ = 0;
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> browserTex_;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> browserSrv_;

@@ -3,16 +3,23 @@
 #include <vector>
 #include <windows.h>
 
+// One source inside a scene.
+struct UiSourceSetting {
+    int type = 0;          // 0 Capture, 1 Video device, 2 Browser, 3 Audio in, 4 Audio out
+    int enabled = 1;
+    std::string device;    // Video/Audio: device name ("" = default)
+    int monitor = 0;       // Capture
+    std::string window;    // Capture: window title substring ("" = monitor)
+    int dxgi = 0;          // Capture: DXGI duplication
+    int corner = 3;        // Video: PiP corner
+    float camX = -1, camY = -1;  // Video: free PiP position
+};
+
 // One scene: a named source layout the user can switch between.
 struct UiSceneSetting {
     std::string name = "Scene";
-    int capture = 1;
-    int webcam = 0;
-    int browser = 0;
     int cursor = 1;
-    int corner = 3;  // webcam position preset index
-    float camX = -1;  // free webcam position (0..1 of canvas); -1 = use corner
-    float camY = -1;
+    std::vector<UiSourceSetting> sources;
 };
 
 // Persisted UI settings. The stream key is stored DPAPI-encrypted (per user).
@@ -48,6 +55,8 @@ struct UiSettings {
 
     bool stream = false;
     uint32_t streamBitrate = 6000;  // kbps (CBR)
+    bool streamHevc = false;        // H.264 by default (Twitch etc.)
+    int streamReconnect = 5;        // reconnect attempts
     std::string platform = "twitch";
     std::string streamKey;
     std::string customUrl;

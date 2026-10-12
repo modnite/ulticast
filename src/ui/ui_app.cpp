@@ -74,11 +74,16 @@ const D2D1_COLOR_F kBlack = D2D1::ColorF(0x000000);
 
 enum {
     ID_START = 1,
+    ID_REC,
+    ID_LIVE,
     ID_PAUSE,
     ID_CLIP,
     ID_OPENFOLDER,
     ID_TAB_LIVE,
     ID_TAB_SETUP,
+    ID_TAB_RECORD,
+    ID_TAB_STREAM,
+    ID_TAB_SETTINGS,
     ID_SCENE_ADD,
     ID_SCENE_REMOVE,
     ID_SCENE_NAME,
@@ -90,6 +95,8 @@ enum {
     ID_COMBO_GPU,
     ID_COMBO_RATE,
     ID_COMBO_DESKDEV,
+    ID_COMBO_STREAMCODEC,
+    ID_SLIDER_RECONNECT,
     ID_TOGGLE_RECORD,
     ID_TOGGLE_STREAM,
     ID_TOGGLE_WEBCAM,
@@ -129,11 +136,16 @@ enum {
     ID_ITEM_BASE = 1000,
     ID_SCENE_BASE = 2000,
     ID_PREVIEW_WEBCAM = 3000,
+    ID_ADD_SOURCE = 4000,
+    ID_SRC_PROP_BASE = 4001,    // + source index: row click opens properties
+    ID_SRC_TOGGLE_BASE = 4100,  // + source index: enable/disable
+    ID_WINDOW_PICK = 4200,
 };
 
 enum {
     ID_TRAY_SHOW = 9001,
-    ID_TRAY_START,
+    ID_TRAY_REC,
+    ID_TRAY_LIVE,
     ID_TRAY_PAUSE,
     ID_TRAY_CLIP,
     ID_TRAY_EXIT,
@@ -262,20 +274,23 @@ private:
     // drawing
     void Paint();
     void DrawHeader();
-    void DrawLivePage();
+    void DrawModePage(bool recordMode);
+    void DrawRecordCards();
+    void DrawStreamCards();
+    void DrawSettingsPage();
     void DrawSceneRail();
     void DrawPreview(const D2D1_RECT_F& r);
-    void DrawStatsCompact();
-    void DrawSetupPage();
-    void DrawTransport();
+    void DrawPreviewStats(const D2D1_RECT_F& r);
+    void DrawTransport(int mode);  // 0 = record, 1 = stream, 2 = both
     void DrawActivityStrip();
     void DrawPopup();
     void Card(float x, float y, float w, float h, const std::wstring& title);
-    D2D1_RECT_F PreviewRect() const { return S(320, 64, 720, 419); }
+    D2D1_RECT_F PreviewRect() const { return S(320, 64, 720, 300); }
     // preview <-> canvas mapping for the draggable webcam PiP
     D2D1_RECT_F PreviewCanvasToDevice(const D2D1_RECT_F& pr, float cx, float cy, float cw,
                                       float ch) const;
     D2D1_RECT_F PreviewWebcamRect(const D2D1_RECT_F& pr) const;
+    int FirstVideoSourceIndex() const;
 
     void Text(const std::wstring& s, IDWriteTextFormat* fmt, const D2D1_RECT_F& r,
               const D2D1_COLOR_F& color,
@@ -290,7 +305,7 @@ private:
     void Button(int id, const D2D1_RECT_F& r, const std::wstring& label, BtnStyle style,
                 bool enabled = true);
     void Toggle(int id, const D2D1_RECT_F& r, const std::wstring& label, bool* value,
-                bool enabled = true);
+                bool enabled = true, bool pinRight = false);
     void Combo(int id, const D2D1_RECT_F& r, const std::vector<std::wstring>& items, int* sel,
                bool enabled = true);
     void Slider(int id, const D2D1_RECT_F& r, int minV, int maxV, int* value,
@@ -308,8 +323,10 @@ private:
     void ApplySettingsToUi();
     SessionConfig BuildConfig();
     std::string BuildStreamUrl();
-    void StartSession();
+    void StartSession(bool record, bool stream);
     void StopSession();
+    void RecordPressed();   // Start/Stop Recording button
+    void GoLivePressed();   // Go Live / End Stream button
     void StartPreview();
     void StopPreview();
     void RestartPreview();  // re-apply source settings to an idle preview
@@ -370,7 +387,7 @@ private:
 
     // data
     std::vector<std::wstring> monitors_, windows_, webcams_, mics_, backends_, fpss_, codecs_,
-        presets_, positions_, platforms_, gpus_, rates_, desktops_;
+        presets_, positions_, platforms_, gpus_, rates_, desktops_, streamCodecs_;
     std::vector<std::string> backendKeys_, platformKeys_, posKeys_;
     std::vector<int> gpuValues_;
     std::vector<bool> gpuNvenc_;
@@ -379,7 +396,7 @@ private:
     std::vector<bool> codecHevc_;
     int selMonitor_ = 0, selWindow_ = 0, selWebcam_ = 0, selMic_ = 0, selBackend_ = 0, selFps_ = 1,
         selCodec_ = 0, selPreset_ = 4, selPos_ = 3, selPlatform_ = 0, selGpu_ = 0, selRate_ = 0,
-        selDesk_ = 0;
+        selDesk_ = 0, selStreamCodec_ = 0;
     std::wstring bitrateText_, streamBitrateText_;
     int micGainPct_ = 100, deskGainPct_ = 100;
 
@@ -391,18 +408,24 @@ private:
     bool errorShown_ = false;
     std::wstring statusText_;
     bool statusError_ = false;
+    std::wstring lastTitle_;
     std::wstring keyText_, urlText_, chromaText_, browserText_;
 
     // pages + scenes
+    struct UiSource {
+        SessionSourceType type = SessionSourceType::Capture;
+        bool enabled = true;
+        std::string device;      // Video/Audio: device name ("" = system default)
+        int monitor = 0;         // Capture: monitor index
+        std::wstring window;     // Capture: window title substring (empty = monitor)
+        bool dxgi = false;       // Capture: DXGI duplication instead of WGC
+        int corner = 3;          // Video: PiP corner preset
+        float camX = -1, camY = -1;  // Video: free PiP position (0..1 of canvas)
+    };
     struct UiScene {
         std::wstring name;
-        bool capture = true;
-        bool webcam = false;
-        bool browser = false;
         bool cursor = true;
-        int corner = 3;      // index into posKeys_
-        float camX = -1;     // free webcam position (0..1 of the canvas), -1 = corner preset
-        float camY = -1;
+        std::vector<UiSource> sources;
     };
     int page_ = 0;  // 0 = Live, 1 = Setup
     std::vector<UiScene> scenes_;
@@ -413,6 +436,33 @@ private:
     void ApplyLiveScene();
     bool SceneUsesWebcam() const;
     bool SceneUsesBrowser() const;
+
+    // source list helpers
+    void AddSourceAt(int menuIndex);
+    void ApplySourceProperty(int sourceIndex, int itemIndex);
+    void BuildSourceProperties(int sourceIndex);
+    std::vector<std::wstring> SourceMenuItems() const;
+    std::wstring SourceLabel(const UiSource& s) const;
+    std::wstring SourceTag(const UiSource& s) const;
+    void EnsureSceneDefaults(UiScene& scene) const;
+    std::vector<SessionSource> SceneSources(const UiScene& sc) const;
+    void DrawActionPopup();
+    int openAction_ = 0;         // source menu / properties popup (0 = none)
+    int actionSource_ = -1;      // source index the properties popup belongs to
+    D2D1_RECT_F actionRect_{};   // anchor rect for the popup
+    D2D1_RECT_F addBtnRect_{};   // "+ Add" button rect
+    D2D1_RECT_F addMenuRect_{};  // wider anchor for the add-source popup
+    std::vector<D2D1_RECT_F> sourceRowRects_;
+    struct PropItem {
+        int kind = 0;       // 0 monitor, 1 window picker, 2 dxgi, 3 video device,
+                            // 4 corner, 5 remove, 6 default device, 7 audio device
+        std::string value;
+        int number = 0;
+    };
+    std::vector<PropItem> propItems_;
+    std::vector<std::wstring> propLabels_;
+    std::vector<std::wstring> windowPickItems_;
+    bool sourceHintShown_ = false;
 
     // idle preview (capture-only session while not recording)
     bool previewSession_ = false;
@@ -747,11 +797,17 @@ void UiApp::Button(int id, const D2D1_RECT_F& r, const std::wstring& label, BtnS
 }
 
 void UiApp::Toggle(int id, const D2D1_RECT_F& r, const std::wstring& label, bool* value,
-                   bool enabled) {
+                   bool enabled, bool pinRight) {
     hits_.push_back({id, r, enabled});
     const float trackW = Px(38), trackH = Px(20);
-    D2D1_RECT_F track = D2D1::RectF(r.right - trackW, (r.top + r.bottom) / 2 - trackH / 2, r.right,
-                                    (r.top + r.bottom) / 2 + trackH / 2);
+    // The switch hugs its label (with a 12 px gap) instead of floating at the
+    // far end of the row, so it is never visually attached to a neighbour.
+    // pinRight keeps it at the row end (source rows with no label).
+    const float labelW = MeasureText(label, fmtBody_.Get());
+    const float trackX = pinRight ? (r.right - trackW)
+                                  : (std::min)(r.right - trackW, r.left + labelW + Px(12));
+    D2D1_RECT_F track = D2D1::RectF(trackX, (r.top + r.bottom) / 2 - trackH / 2,
+                                    trackX + trackW, (r.top + r.bottom) / 2 + trackH / 2);
     bool hover = enabled && hover_ == id;
 
     D2D1_RECT_F labelR = D2D1::RectF(r.left, r.top, track.left - Px(8), r.bottom);
@@ -900,6 +956,7 @@ void UiApp::Paint() {
     sessionRunning_ = stats_.running;
     if (!sessionRunning_) previewSession_ = false;
     if (!sessionRunning_ && !stats_.failed) errorShown_ = false;
+    UpdateWindowTitleState();
 
     RefreshPreview();
 
@@ -935,11 +992,14 @@ void UiApp::Paint() {
     hasPopup_ = false;
 
     DrawHeader();
-    if (page_ == 0)
-        DrawLivePage();
+    if (page_ == 2)
+        DrawSettingsPage();
     else
-        DrawSetupPage();
-    DrawPopup();
+        DrawModePage(page_ == 0);
+    if (openAction_)
+        DrawActionPopup();
+    else
+        DrawPopup();
 
     HRESULT hr = dc_->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {
@@ -967,8 +1027,9 @@ void UiApp::DrawHeader() {
             dc_->FillRoundedRectangle(rr, Br(kPanel2));
         Text(label, fmtBody_, r, active ? kText : kTextDim, DWRITE_TEXT_ALIGNMENT_CENTER);
     };
-    tab(ID_TAB_LIVE, 238, 78, L"Live", page_ == 0);
-    tab(ID_TAB_SETUP, 322, 86, L"Setup", page_ == 1);
+    tab(ID_TAB_RECORD, 238, 92, L"Record", page_ == 0);
+    tab(ID_TAB_STREAM, 336, 88, L"Stream", page_ == 1);
+    tab(ID_TAB_SETTINGS, 430, 100, L"Settings", page_ == 2);
 
     std::wstring label;
     D2D1_COLOR_F color;
@@ -978,21 +1039,24 @@ void UiApp::DrawHeader() {
     } else if (!sessionRunning_) {
         label = L"IDLE";
         color = kTextDim;
+    } else if (stats_.recording && stats_.streaming) {
+        label = L"REC + LIVE";
+        color = kRec;
+    } else if (stats_.recording) {
+        label = L"RECORDING";
+        color = kRec;
+    } else if (stats_.streaming) {
+        label = L"LIVE";
+        color = kAccent2;
+    } else if (stats_.replayArmed) {
+        label = L"REPLAY";
+        color = kAccent;
     } else if (previewSession_) {
         label = L"PREVIEW";
         color = kAccent;
-    } else if (stats_.paused) {
-        label = L"PAUSED";
-        color = kWarn;
-    } else if (stats_.reconnecting) {
-        label = L"RECONNECTING";
-        color = kWarn;
-    } else if (settings_.stream) {
-        label = L"LIVE";
-        color = kAccent2;
     } else {
-        label = L"RECORDING";
-        color = kRec;
+        label = L"IDLE";
+        color = kTextDim;
     }
     float pillW = MeasureText(label, fmtPill_.Get()) + Px(29);
     D2D1_RECT_F pillR =
@@ -1011,9 +1075,19 @@ D2D1_RECT_F UiApp::PreviewCanvasToDevice(const D2D1_RECT_F& pr, float cx, float 
     return D2D1::RectF(ox + cx * sc, oy + cy * sc, ox + (cx + cw) * sc, oy + (cy + ch) * sc);
 }
 
+int UiApp::FirstVideoSourceIndex() const {
+    if (scenes_.empty()) return -1;
+    const UiScene& s = scenes_[activeScene_];
+    for (size_t i = 0; i < s.sources.size(); ++i)
+        if (s.sources[i].type == SessionSourceType::Webcam) return (int)i;
+    return -1;
+}
+
 D2D1_RECT_F UiApp::PreviewWebcamRect(const D2D1_RECT_F& pr) const {
     if (scenes_.empty() || stats_.width == 0 || stats_.height == 0) return D2D1::RectF();
-    const UiScene& s = scenes_[activeScene_];
+    const int vi = FirstVideoSourceIndex();
+    if (vi < 0) return D2D1::RectF();
+    const UiSource& s = scenes_[activeScene_].sources[vi];
     const float canvasW = (float)stats_.width, canvasH = (float)stats_.height;
     const float cw = canvasW / 4.0f;
     const float ch = cw * 3.0f / 4.0f;  // 4:3 approximation for hit testing
@@ -1093,8 +1167,8 @@ void UiApp::DrawPreview(const D2D1_RECT_F& r) {
     }
 
     // Draggable webcam PiP (only while a real session has the camera up).
-    if (!previewSession_ && sessionRunning_ && !scenes_.empty() &&
-        scenes_[activeScene_].webcam && !stats_.webcamName.empty()) {
+    if (!previewSession_ && sessionRunning_ && FirstVideoSourceIndex() >= 0 &&
+        !stats_.webcamName.empty()) {
         D2D1_RECT_F wr = PreviewWebcamRect(r);
         if (wr.right > wr.left && wr.bottom > wr.top) {
             hits_.push_back({ID_PREVIEW_WEBCAM, wr, true});
@@ -1113,30 +1187,34 @@ void UiApp::DrawPreview(const D2D1_RECT_F& r) {
     }
 }
 
-void UiApp::DrawLivePage() {
+void UiApp::DrawModePage(bool recordMode) {
     DrawSceneRail();
 
     D2D1_RECT_F preview = PreviewRect();
     DrawPreview(preview);
+    DrawPreviewStats(preview);
 
-    DrawStatsCompact();
+    if (recordMode)
+        DrawRecordCards();
+    else
+        DrawStreamCards();
+
     DrawActivityStrip();
-    DrawTransport();
+    DrawTransport(recordMode ? 0 : 1);
 }
 
 void UiApp::DrawSceneRail() {
     const float x = 20, w = 280;
     SectionLabel(L"SCENES", x, 64);
 
-    // A list well keeps the fixed-height area looking intentional.
-    Panel(S(x, 82, w, 6 * 36 + 4), 10, WithAlpha(kPanel, 0.35f), false);
-
+    const int n = (int)scenes_.size();
+    Panel(S(x, 82, w, n * 36 + 4), 10, WithAlpha(kPanel, 0.35f), false);
     float y = 86;
-    for (size_t i = 0; i < scenes_.size() && i < 6; ++i) {
-        const int id = ID_SCENE_BASE + (int)i;
+    for (int i = 0; i < n && i < 6; ++i) {
+        const int id = ID_SCENE_BASE + i;
         D2D1_RECT_F row = S(x, y, w, 32);
         hits_.push_back({id, row, true});
-        const bool active = (int)i == activeScene_;
+        const bool active = i == activeScene_;
         auto rr = D2D1::RoundedRect(row, Px(8), Px(8));
         if (active)
             dc_->FillRoundedRectangle(rr, Br(WithAlpha(kAccent, 0.28f)));
@@ -1151,41 +1229,300 @@ void UiApp::DrawSceneRail() {
         y += 36;
     }
 
-    // name + add/remove, fixed under the (fixed-height) list
-    y = 86 + 6 * 36 + 8;
+    // name + add/remove
+    y = 86 + n * 36 + 8;
     Field(ID_SCENE_NAME, S(x, y, 180, 34), &sceneName_, false, L"Scene name");
     Button(ID_SCENE_ADD, S(x + 188, y, 44, 34), L"+", BtnStyle::Ghost, scenes_.size() < 6);
     Button(ID_SCENE_REMOVE, S(x + 240, y, 40, 34), L"-", BtnStyle::Ghost, scenes_.size() > 1);
 
-    y += 34 + 24;
+    // ---- sources (the active scene's list)
+    y += 34 + 22;
     SectionLabel(L"SOURCES", x, y);
-    y += 22;
-    Toggle(ID_SRC_CAPTURE, S(x, y, w, 38), L"Game Capture", &scenes_[activeScene_].capture);
-    y += 42;
-    Toggle(ID_SRC_WEBCAM, S(x, y, 150, 38), L"Webcam", &scenes_[activeScene_].webcam);
-    Combo(ID_COMBO_CORNER, S(x + 170, y, 110, 38), positions_, &scenes_[activeScene_].corner,
-          scenes_[activeScene_].webcam);
-    y += 42;
-    Toggle(ID_SRC_BROWSER, S(x, y, w, 38), L"Browser Overlay", &scenes_[activeScene_].browser);
-    y += 42;
-    Toggle(ID_SRC_CURSOR, S(x, y, w, 38), L"Show Cursor", &scenes_[activeScene_].cursor);
+    addBtnRect_ = S(x + 196, y - 5, 84, 24);
+    addMenuRect_ = S(x, y - 5, w, 24);
+    Button(ID_ADD_SOURCE, addBtnRect_, L"+ Add", BtnStyle::Ghost);
+    y += 26;
+
+    const UiScene& sc = scenes_[activeScene_];
+    sourceRowRects_.assign(sc.sources.size(), D2D1_RECT_F{});
+    for (size_t i = 0; i < sc.sources.size(); ++i) {
+        if (y > 540) break;  // keep the transport row reachable
+        D2D1_RECT_F row = S(x, y, w, 32);
+        sourceRowRects_[i] = row;
+        const int propId = ID_SRC_PROP_BASE + (int)i;
+        hits_.push_back({propId, row, true});
+        auto rr = D2D1::RoundedRect(row, Px(8), Px(8));
+        dc_->FillRoundedRectangle(rr, Br(hover_ == propId ? kPanel2 : WithAlpha(kPanel, 0.7f)));
+        dc_->DrawRoundedRectangle(rr, Br(kBorder), Px(1));
+        Text(SourceTag(sc.sources[i]), fmtPill_, S(x + 8, y, 40, 32), kAccent,
+             DWRITE_TEXT_ALIGNMENT_CENTER);
+        dc_->PushAxisAlignedClip(S(x + 52, y, w - 52 - 98, 32), D2D1_ANTIALIAS_MODE_ALIASED);
+        Text(SourceLabel(sc.sources[i]), fmtSmall_, S(x + 52, y, w - 52 - 98, 32),
+             sc.sources[i].enabled ? kText : WithAlpha(kTextDim, 0.6f));
+        dc_->PopAxisAlignedClip();
+        Toggle(ID_SRC_TOGGLE_BASE + (int)i, S(x + w - 54, y, 50, 32), L"",
+               &scenes_[activeScene_].sources[i].enabled, true, /*pinRight=*/true);
+        y += 36;
+    }
+
+    // cursor is a scene-level source-like switch
+    if (y <= 540) {
+        Toggle(ID_SRC_CURSOR, S(x, y, w, 32), L"Show Cursor", &scenes_[activeScene_].cursor);
+    }
 }
 
-void UiApp::DrawStatsCompact() {
-    D2D1_RECT_F r = S(320, 495, 720, 56);
-    Panel(r, 12, WithAlpha(kPanel, 0.65f), false);
-    Text(FormatTime(stats_.elapsed), fmtMono_, S(340, 502, 150, 30), kText);
+std::wstring UiApp::SourceTag(const UiSource& s) const {
+    switch (s.type) {
+        case SessionSourceType::Capture:
+            if (!s.window.empty()) return L"WIN";
+            return s.dxgi ? L"GAME" : L"DISP";
+        case SessionSourceType::Webcam: return L"VID";
+        case SessionSourceType::Browser: return L"WEB";
+        case SessionSourceType::AudioIn: return L"MIC";
+        case SessionSourceType::AudioOut: return L"SYS";
+    }
+    return L"?";
+}
+
+std::wstring UiApp::SourceLabel(const UiSource& s) const {
+    switch (s.type) {
+        case SessionSourceType::Capture:
+            if (!s.window.empty()) return s.window;
+            if (s.monitor >= 0 && s.monitor < (int)monitors_.size()) return monitors_[s.monitor];
+            return Format(L"Display %d", s.monitor + 1);
+        case SessionSourceType::Webcam:
+            return s.device.empty() ? L"Default camera / capture card" : Widen(s.device);
+        case SessionSourceType::Browser:
+            return browserText_.empty() ? L"Browser overlay" : L"Browser: " + browserText_;
+        case SessionSourceType::AudioIn:
+            return s.device.empty() ? L"Default microphone" : Widen(s.device);
+        case SessionSourceType::AudioOut:
+            return s.device.empty() ? L"Desktop audio (default output)" : Widen(s.device);
+    }
+    return L"Source";
+}
+
+std::vector<std::wstring> UiApp::SourceMenuItems() const {
+    return {L"Display Capture (monitor)", L"Window Capture", L"Game Capture (DXGI)",
+            L"Video Capture Device (camera, capture card)", L"Microphone",
+            L"Desktop Audio (system sound)", L"Browser Overlay"};
+}
+
+void UiApp::BuildSourceProperties(int sourceIndex) {
+    propItems_.clear();
+    propLabels_.clear();
+    if (sourceIndex < 0 || sourceIndex >= (int)scenes_[activeScene_].sources.size()) return;
+    const UiSource& s = scenes_[activeScene_].sources[sourceIndex];
+    auto add = [&](int kind, const std::wstring& label, const std::string& value = std::string(),
+                   int number = 0) {
+        propItems_.push_back({kind, value, number});
+        propLabels_.push_back(label);
+    };
+    switch (s.type) {
+        case SessionSourceType::Capture:
+            for (size_t i = 0; i < monitors_.size(); ++i) add(0, monitors_[i], "", (int)i);
+            add(1, s.window.empty() ? L"Window capture: pick a window…"
+                                    : L"Window: " + s.window);
+            add(2, s.dxgi ? L"Game mode (DXGI duplication): on"
+                          : L"Game mode (DXGI duplication): off");
+            add(5, L"Remove source");
+            break;
+        case SessionSourceType::Webcam: {
+            add(6, L"Default camera / capture card");
+            for (size_t i = 1; i < webcams_.size(); ++i) add(3, webcams_[i], Narrow(webcams_[i]));
+            for (int c = 0; c < 4; ++c) {
+                std::wstring label = L"Position: " + positions_[c];
+                if (c == s.corner) label += L"  (current)";
+                add(4, label, "", c);
+            }
+            add(5, L"Remove source");
+            break;
+        }
+        case SessionSourceType::AudioIn:
+            add(6, L"Default microphone");
+            for (size_t i = 1; i < mics_.size(); ++i) add(7, mics_[i], Narrow(mics_[i]));
+            add(5, L"Remove source");
+            break;
+        case SessionSourceType::AudioOut:
+            add(6, L"Default output (desktop audio)");
+            for (size_t i = 1; i < desktops_.size(); ++i) add(7, desktops_[i], Narrow(desktops_[i]));
+            add(5, L"Remove source");
+            break;
+        case SessionSourceType::Browser:
+            add(5, L"Remove source");
+            break;
+    }
+}
+
+void UiApp::ApplySourceProperty(int sourceIndex, int itemIndex) {
+    if (sourceIndex < 0 || sourceIndex >= (int)scenes_[activeScene_].sources.size()) return;
+    if (itemIndex < 0 || itemIndex >= (int)propItems_.size()) return;
+    UiSource& s = scenes_[activeScene_].sources[sourceIndex];
+    const PropItem& it = propItems_[itemIndex];
+    bool captureChanged = false;
+    switch (it.kind) {
+        case 0:  // monitor
+            s.monitor = it.number;
+            s.window.clear();
+            captureChanged = true;
+            break;
+        case 1: {  // window picker (second step)
+            windowPickItems_.clear();
+            windowPickItems_.push_back(L"Full monitor (no window)");
+            for (auto& t : WgcCapture::ListWindows()) windowPickItems_.push_back(t);
+            actionSource_ = sourceIndex;
+            openAction_ = ID_WINDOW_PICK;
+            actionRect_ = actionRect_;
+            return;  // the popup opens; no other change yet
+        }
+        case 2:  // DXGI toggle
+            s.dxgi = !s.dxgi;
+            captureChanged = true;
+            break;
+        case 3:  // video device
+            s.device = it.value;
+            break;
+        case 4:  // PiP corner
+            s.corner = it.number;
+            s.camX = s.camY = -1;
+            break;
+        case 5:  // remove
+            scenes_[activeScene_].sources.erase(scenes_[activeScene_].sources.begin() +
+                                                sourceIndex);
+            break;
+        case 6:  // default device
+            s.device.clear();
+            break;
+        case 7:  // audio device
+            s.device = it.value;
+            break;
+    }
+    SyncSettingsFromUi();
+    SaveUiSettings(settings_);
+    PushSceneSources();
+    RestartPreview();
+    if (captureChanged && sessionRunning_ && !previewSession_) {
+        statusText_ = L"Capture source changed — press Stop/Start to apply";
+        statusError_ = false;
+    }
+}
+
+void UiApp::AddSourceAt(int menuIndex) {
+    if (scenes_.empty()) return;
+    UiScene& sc = scenes_[activeScene_];
+    auto findCapture = [&]() -> int {
+        for (size_t i = 0; i < sc.sources.size(); ++i)
+            if (sc.sources[i].type == SessionSourceType::Capture) return (int)i;
+        return -1;
+    };
+    auto has = [&](SessionSourceType t) {
+        for (const UiSource& s : sc.sources)
+            if (s.type == t) return true;
+        return false;
+    };
+    UiSource s;
+    switch (menuIndex) {
+        case 0:  // display
+        case 1:  // window
+        case 2: {  // game (DXGI)
+            s.type = SessionSourceType::Capture;
+            s.monitor = selMonitor_;
+            s.dxgi = menuIndex == 2;
+            if (menuIndex == 1 && selWindow_ > 0 && selWindow_ < (int)windows_.size())
+                s.window = windows_[selWindow_];
+            const int existing = findCapture();
+            if (existing >= 0) {
+                sc.sources[existing] = s;
+                statusText_ = L"Capture source replaced";
+            } else {
+                sc.sources.insert(sc.sources.begin(), s);
+                statusText_ = L"Capture source added";
+            }
+            statusError_ = false;
+            break;
+        }
+        case 3:  // video capture device (camera, capture card)
+            s.type = SessionSourceType::Webcam;
+            s.device = settings_.webcamDevice;
+            s.corner = 3;
+            sc.sources.push_back(s);
+            statusText_ = L"Video source added — click its row to pick a device";
+            statusError_ = false;
+            break;
+        case 4:  // microphone
+            if (!has(SessionSourceType::AudioIn)) {
+                s.type = SessionSourceType::AudioIn;
+                s.device = settings_.micDevice;
+                sc.sources.push_back(s);
+            }
+            break;
+        case 5:  // desktop audio
+            if (!has(SessionSourceType::AudioOut)) {
+                s.type = SessionSourceType::AudioOut;
+                s.device = settings_.desktopDevice;
+                sc.sources.push_back(s);
+            }
+            break;
+        case 6:  // browser overlay
+            if (!has(SessionSourceType::Browser)) {
+                s.type = SessionSourceType::Browser;
+                sc.sources.push_back(s);
+            }
+            break;
+    }
+    SyncSettingsFromUi();
+    SaveUiSettings(settings_);
+    PushSceneSources();
+    RestartPreview();
+    if (menuIndex <= 2 && sessionRunning_ && !previewSession_) {
+        statusText_ = L"Capture source changed — press Stop/Start to apply";
+        statusError_ = false;
+    }
+}
+
+void UiApp::DrawActionPopup() {
+    if (!openAction_) return;
+    if (openAction_ == ID_ADD_SOURCE) {
+        popup_.items = SourceMenuItems();
+    } else if (openAction_ == ID_WINDOW_PICK) {
+        popup_.items = windowPickItems_;
+    } else {
+        popup_.items = propLabels_;
+    }
+    if (popup_.items.empty()) {
+        openAction_ = 0;
+        return;
+    }
+    popup_.rect = actionRect_;
+    popup_.sel = nullptr;
+    hasPopup_ = true;
+    DrawPopup();
+}
+
+void UiApp::DrawPreviewStats(const D2D1_RECT_F& r) {
+    const float stripH = Px(54);
+    D2D1_RECT_F strip =
+        D2D1::RectF(r.left + Px(1), r.bottom - stripH, r.right - Px(1), r.bottom - Px(1));
+    dc_->FillRectangle(strip, Br(WithAlpha(kBlack, 0.5f)));
+
+    Text(FormatTime(stats_.elapsed), fmtMono_,
+         D2D1::RectF(strip.left + Px(18), strip.top + Px(4), strip.left + Px(170),
+                     strip.top + Px(34)),
+         kText);
 
     double fps = stats_.elapsed > 0.1 ? stats_.captured / stats_.elapsed : 0.0;
     std::wstring line = Format(L"%.0f fps   ·   %.1f Mbps   ·   %s", fps, stats_.kbps / 1000.0,
                                Widen(stats_.backend).c_str());
     if (stats_.width) line += Format(L"   ·   %ux%u", stats_.width, stats_.height);
     line += Format(L"   ·   %llu dropped", (unsigned long long)stats_.dropped);
-    Text(line, fmtSmall_, S(500, 502, 520, 30), kTextDim, DWRITE_TEXT_ALIGNMENT_TRAILING);
+    Text(line, fmtSmall_,
+         D2D1::RectF(strip.right - Px(560), strip.top + Px(10), strip.right - Px(18),
+                     strip.top + Px(28)),
+         kTextDim, DWRITE_TEXT_ALIGNMENT_TRAILING);
 
     std::wstring audio;
     if (previewSession_)
-        audio = L"Preview — press Start to record or stream";
+        audio = L"Preview — sources appear when you Start";
     else {
         audio = L"no audio";
         if (!stats_.desktopDevice.empty() && stats_.desktopDevice != L"-")
@@ -1194,20 +1531,102 @@ void UiApp::DrawStatsCompact() {
             audio += L" + " + stats_.micDevice;
         if (!stats_.webcamName.empty()) audio += L"   ·   cam " + stats_.webcamName;
     }
-    dc_->PushAxisAlignedClip(S(340, 534, 680, 15), D2D1_ANTIALIAS_MODE_ALIASED);
-    Text(audio, fmtSmall_, S(340, 533, 680, 15), WithAlpha(kTextDim, 0.75f));
+    dc_->PushAxisAlignedClip(
+        D2D1::RectF(strip.left + Px(18), strip.top + Px(34), strip.right - Px(18),
+                    strip.bottom - Px(4)),
+        D2D1_ANTIALIAS_MODE_ALIASED);
+    Text(audio, fmtSmall_,
+         D2D1::RectF(strip.left + Px(18), strip.top + Px(33), strip.right - Px(18),
+                     strip.bottom - Px(5)),
+         WithAlpha(kTextDim, 0.8f));
     dc_->PopAxisAlignedClip();
 }
 
-void UiApp::DrawSetupPage() {
+void UiApp::DrawRecordCards() {
+    const float rowH = 40, gap = 8, pad = 10, headH = 18, cw = 212;
+    const float cy = 376;
+
+    Card(320, cy, 232, pad + headH + 3 * rowH + 2 * gap + pad, L"RECORDING");
+    float y = cy + pad + headH + 4;
+    D2D1_RECT_F pathR = S(320 + pad, y, cw - 92, rowH);
+    Panel(pathR, 8, kPanel, true);
+    dc_->PushAxisAlignedClip(pathR, D2D1_ANTIALIAS_MODE_ALIASED);
+    Text(ShortPath(settings_.recordPath), fmtSmall_, Inset(pathR, 12, 0), kText);
+    dc_->PopAxisAlignedClip();
+    Button(ID_BROWSE, S(320 + pad + cw - 84, y, 84, rowH), L"Browse", BtnStyle::Ghost);
+    y += rowH + gap;
+    Combo(ID_COMBO_CODEC, S(320 + pad, y, cw, rowH), codecs_, &selCodec_);
+    y += rowH + gap;
+    Text(L"Container: MKV (crash-safe)", fmtSmall_, S(320 + pad, y, cw, rowH),
+         WithAlpha(kTextDim, 0.7f));
+
+    Card(564, cy, 232, pad + headH + 3 * rowH + 2 * gap + pad, L"CLIPS");
+    y = cy + pad + headH + 4;
+    Toggle(ID_TOGGLE_REPLAY, S(564 + pad, y, cw, rowH), L"Replay", &settings_.replay);
+    y += rowH + gap;
+    Slider(ID_SLIDER_REPLAY, S(564 + pad, y, cw, rowH), 10, 120, &settings_.replaySeconds,
+           L"%ds");
+    y += rowH + gap;
+    Text(L"F9 = save the last moments", fmtSmall_, S(564 + pad, y, cw, rowH),
+         WithAlpha(kTextDim, 0.7f));
+
+    Card(808, cy, 232, pad + headH + 4 * rowH + 3 * gap + pad, L"ENCODING");
+    y = cy + pad + headH + 4;
+    Combo(ID_COMBO_RATE, S(808 + pad, y, cw, rowH), rates_, &selRate_);
+    y += rowH + gap;
+    if (selRate_ == 0)
+        Slider(ID_SLIDER_CQP, S(808 + pad, y, cw, rowH), 1, 51, (int*)&settings_.cqp, L"CQ %d");
+    else
+        Field(ID_FIELD_BITRATE, S(808 + pad, y, cw, rowH), &bitrateText_, false,
+              L"Bitrate (kbps)");
+    y += rowH + gap;
+    Combo(ID_COMBO_PRESET, S(808 + pad, y, cw, rowH), presets_, &selPreset_);
+    y += rowH + gap;
+    Slider(ID_SLIDER_BFRAMES, S(808 + pad, y, cw, rowH), 0, 4, &settings_.bframes,
+           L"B-frames %d");
+}
+
+void UiApp::DrawStreamCards() {
+    const float rowH = 40, gap = 8, pad = 10, headH = 18, cw = 334;
+    const float cy = 376;
+
+    Card(320, cy, 354, pad + headH + 4 * rowH + 3 * gap + pad, L"PLATFORM");
+    float y = cy + pad + headH + 4;
+    Combo(ID_COMBO_PLATFORM, S(320 + pad, y, cw, rowH), platforms_, &selPlatform_);
+    y += rowH + gap;
+    if (platformKeys_[selPlatform_] == "custom")
+        Field(ID_FIELD_URL, S(320 + pad, y, cw, rowH), &urlText_, false, L"rtmp:// ingest URL");
+    else
+        Field(ID_FIELD_KEY, S(320 + pad, y, cw, rowH), &keyText_, true, L"Stream key (paste)");
+    y += rowH + gap;
+    Slider(ID_SLIDER_RECONNECT, S(320 + pad, y, cw, rowH), 1, 10, &settings_.streamReconnect,
+           L"%dx");
+    y += rowH + gap;
+    Text(L"Press Go Live to start streaming", fmtSmall_, S(320 + pad, y, cw, rowH),
+         WithAlpha(kTextDim, 0.7f));
+
+    Card(686, cy, 354, pad + headH + 4 * rowH + 3 * gap + pad, L"STREAM QUALITY");
+    y = cy + pad + headH + 4;
+    Field(ID_FIELD_STREAMBITRATE, S(686 + pad, y, cw, rowH), &streamBitrateText_, false,
+          L"Bitrate kbps (CBR)");
+    y += rowH + gap;
+    Combo(ID_COMBO_STREAMCODEC, S(686 + pad, y, cw, rowH), streamCodecs_, &selStreamCodec_);
+    y += rowH + gap;
+    Combo(ID_COMBO_PRESET, S(686 + pad, y, cw, rowH), presets_, &selPreset_);
+    y += rowH + gap;
+    Text(L"CBR — pick a bitrate your upload can hold", fmtSmall_, S(686 + pad, y, cw, rowH),
+         WithAlpha(kTextDim, 0.7f));
+}
+
+void UiApp::DrawSettingsPage() {
     const float rowH = 34, rowGap = 6, cardGap = 12, pad = 10, headH = 18;
 
-    // ---- left column: capture, devices, encoding
+    // ---- left column: capture defaults, devices, browser
     {
         const float x = 20, w = 490, cw = w - 20;  // card content width
         float cy = 64;
 
-        Card(x, cy, w, pad + headH + 3 * rowH + 2 * rowGap + pad, L"SOURCE");
+        Card(x, cy, w, pad + headH + 3 * rowH + 2 * rowGap + pad, L"CAPTURE DEFAULTS");
         float y = cy + pad + headH + 4;
         Combo(ID_COMBO_MONITOR, S(x + pad, y, 300, rowH), monitors_, &selMonitor_, selWindow_ == 0);
         Combo(ID_COMBO_FPS, S(x + pad + 318, y, cw - 318, rowH), fpss_, &selFps_);
@@ -1218,7 +1637,7 @@ void UiApp::DrawSetupPage() {
         Combo(ID_COMBO_GPU, S(x + pad, y, cw, rowH), gpus_, &selGpu_);
         cy += pad + headH + 3 * rowH + 2 * rowGap + pad + cardGap;
 
-        Card(x, cy, w, pad + headH + 5 * rowH + 4 * rowGap + pad, L"CAMERA & AUDIO");
+        Card(x, cy, w, pad + headH + 5 * rowH + 4 * rowGap + pad, L"CAMERA & AUDIO DEFAULTS");
         y = cy + pad + headH + 4;
         Combo(ID_COMBO_WEBCAMDEV, S(x + pad, y, cw, rowH), webcams_, &selWebcam_);
         y += rowH + rowGap;
@@ -1237,109 +1656,81 @@ void UiApp::DrawSetupPage() {
         Field(ID_FIELD_CHROMA, S(x + pad + 146, y, 160, rowH), &chromaText_, false, L"00FF00");
         cy += pad + headH + 5 * rowH + 4 * rowGap + pad + cardGap;
 
-        Card(x, cy, w, pad + headH + 4 * rowH + 3 * rowGap + pad, L"VIDEO");
-        y = cy + pad + headH + 4;
-        Combo(ID_COMBO_RATE, S(x + pad, y, 226, rowH), rates_, &selRate_);
-        Combo(ID_COMBO_PRESET, S(x + pad + 244, y, 226, rowH), presets_, &selPreset_);
-        y += rowH + rowGap;
-        if (selRate_ == 0) {
-            Slider(ID_SLIDER_CQP, S(x + pad, y, 226, rowH), 1, 51, (int*)&settings_.cqp, L"CQ %d");
-        } else {
-            Field(ID_FIELD_BITRATE, S(x + pad, y, 226, rowH), &bitrateText_, false,
-                  L"Bitrate (kbps)");
-        }
-        Slider(ID_SLIDER_BFRAMES, S(x + pad + 244, y, 226, rowH), 0, 4, &settings_.bframes,
-               L"B-frames %d");
-        y += rowH + rowGap;
-        Toggle(ID_TOGGLE_LOOKAHEAD, S(x + pad, y, 221, rowH), L"Lookahead", &settings_.lookahead);
-        Toggle(ID_TOGGLE_MULTIPASS, S(x + pad + 249, y, 221, rowH), L"Two-pass",
-               &settings_.multipass);
-        y += rowH + rowGap;
-        Text(L"Codec", fmtBody_, S(x + pad, y, 60, rowH), kTextDim);
-        Combo(ID_COMBO_CODEC, S(x + pad + 66, y, 200, rowH), codecs_, &selCodec_);
-    }
-
-    // ---- right column: output, clips, stream, overlay, misc
-    {
-        const float x = 550, w = 490, cw = w - 20;
-        float cy = 64;
-
-        Card(x, cy, w, pad + headH + rowH + pad, L"OUTPUT");
-        float y = cy + pad + headH + 4;
-        Toggle(ID_TOGGLE_RECORD, S(x + pad, y, 120, rowH), L"Record", &settings_.record);
-        D2D1_RECT_F pathR = S(x + pad + 136, y, 232, rowH);
-        Panel(pathR, 8, kPanel, true);
-        dc_->PushAxisAlignedClip(pathR, D2D1_ANTIALIAS_MODE_ALIASED);
-        Text(ShortPath(settings_.recordPath), fmtSmall_, Inset(pathR, 12, 0),
-             settings_.record ? kText : kTextDim);
-        dc_->PopAxisAlignedClip();
-        Button(ID_BROWSE, S(x + pad + 384, y, 86, rowH), L"Browse", BtnStyle::Ghost,
-               settings_.record);
-        cy += pad + headH + rowH + pad + cardGap;
-
-        Card(x, cy, w, pad + headH + rowH + pad, L"CLIPS");
-        y = cy + pad + headH + 4;
-        Toggle(ID_TOGGLE_REPLAY, S(x + pad, y, 120, rowH), L"Replay", &settings_.replay);
-        Slider(ID_SLIDER_REPLAY, S(x + pad + 136, y, 200, rowH), 10, 120, &settings_.replaySeconds,
-               L"%ds");
-        Text(L"F9 = save clip", fmtSmall_, S(x + pad + 346, y, 124, rowH),
-             WithAlpha(kTextDim, 0.8f));
-        cy += pad + headH + rowH + pad + cardGap;
-
-        Card(x, cy, w, pad + headH + 3 * rowH + 2 * rowGap + pad, L"STREAM");
-        y = cy + pad + headH + 4;
-        Combo(ID_COMBO_PLATFORM, S(x + pad, y, 226, rowH), platforms_, &selPlatform_);
-        Toggle(ID_TOGGLE_STREAM, S(x + pad + 244, y, 226, rowH), L"Go Live", &settings_.stream);
-        y += rowH + rowGap;
-        Field(ID_FIELD_STREAMBITRATE, S(x + pad, y, 150, rowH), &streamBitrateText_, false,
-              L"kbps (CBR)");
-        if (platformKeys_[selPlatform_] == "custom")
-            Field(ID_FIELD_URL, S(x + pad + 166, y, 304, rowH), &urlText_, false,
-                  L"rtmp:// ingest URL");
-        else
-            Field(ID_FIELD_KEY, S(x + pad + 166, y, 304, rowH), &keyText_, true,
-                  L"Stream key (paste)");
-        y += rowH + rowGap;
-        Text(L"Streaming uses CBR — pick a bitrate your upload can hold", fmtSmall_,
-             S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
-        cy += pad + headH + 3 * rowH + 2 * rowGap + pad + cardGap;
-
         Card(x, cy, w, pad + headH + rowH + pad, L"BROWSER OVERLAY");
         y = cy + pad + headH + 4;
         Field(ID_FIELD_BROWSER, S(x + pad, y, cw, rowH), &browserText_, false,
               L"HTML file or https:// URL (add the source in a scene)");
-        cy += pad + headH + rowH + pad + cardGap;
+    }
 
-        Card(x, cy, w, pad + headH + 2 * rowH + rowGap + pad, L"TROUBLESHOOTING");
-        y = cy + pad + headH + 4;
-        Button(ID_OPENLOGS, S(x + pad, y, 150, rowH), L"Open Logs", BtnStyle::Ghost);
-        Button(ID_REPORT, S(x + pad + 158, y, 150, rowH), L"Report Bug", BtnStyle::Ghost);
-        Button(ID_OPENFOLDER, S(x + pad + 316, y, 154, rowH), L"Open Folder", BtnStyle::Ghost,
-               settings_.record);
+    // ---- right column: defaults for new sources, behavior, misc
+    {
+        const float x = 550, w = 490, cw = w - 20;
+        float cy = 64;
+
+        Card(x, cy, w, pad + headH + 2 * rowH + rowGap + pad, L"ADVANCED ENCODER");
+        float y = cy + pad + headH + 4;
+        Toggle(ID_TOGGLE_LOOKAHEAD, S(x + pad, y, 221, rowH), L"Lookahead", &settings_.lookahead);
+        Toggle(ID_TOGGLE_MULTIPASS, S(x + pad + 249, y, 221, rowH), L"Two-pass",
+               &settings_.multipass);
         y += rowH + rowGap;
+        Text(L"Applies to recording, streaming and the replay buffer", fmtSmall_,
+             S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+        cy += pad + headH + 2 * rowH + rowGap + pad + cardGap;
+
+        Card(x, cy, w, pad + headH + 2 * rowH + rowGap + pad, L"BEHAVIOR");
+        y = cy + pad + headH + 4;
         Toggle(ID_TOGGLE_IDLEPREVIEW, S(x + pad, y, 221, rowH), L"Idle preview",
                &settings_.idlePreview);
         Toggle(ID_TOGGLE_TRAYCLOSE, S(x + pad + 249, y, 221, rowH), L"Close to tray",
                &settings_.closeToTray);
+        y += rowH + rowGap;
+        Text(L"The camera opens only while recording, streaming or replay is armed", fmtSmall_,
+             S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+        cy += pad + headH + 2 * rowH + rowGap + pad + cardGap;
+
+        Card(x, cy, w, pad + headH + rowH + pad, L"TROUBLESHOOTING");
+        y = cy + pad + headH + 4;
+        Button(ID_OPENLOGS, S(x + pad, y, 150, rowH), L"Open Logs", BtnStyle::Ghost);
+        Button(ID_REPORT, S(x + pad + 158, y, 150, rowH), L"Report Bug", BtnStyle::Ghost);
+        Button(ID_OPENFOLDER, S(x + pad + 316, y, 154, rowH), L"Open Folder", BtnStyle::Ghost);
+        cy += pad + headH + rowH + pad + cardGap;
+
+        Card(x, cy, w, pad + headH + 2 * rowH + rowGap + pad, L"ABOUT");
+        y = cy + pad + headH + 4;
+        Text(Format(L"Ulticast %hs — %hs", ULTI_VERSION, ULTI_REPO), fmtSmall_,
+             S(x + pad, y, cw, rowH), kTextDim);
+        y += rowH + rowGap;
+        Text(L"Scenes, sources and settings are stored in %APPDATA%\\Ulticast", fmtSmall_,
+             S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
     }
 }
 
-void UiApp::DrawTransport() {
-    const bool recording = sessionRunning_ && !previewSession_;
-    Button(ID_START, S(20, 624, 140, 44), recording ? L"Stop" : L"Start",
-           recording ? BtnStyle::Danger : BtnStyle::Primary);
-    Button(ID_PAUSE, S(168, 624, 100, 44), stats_.paused ? L"Resume" : L"Pause", BtnStyle::Ghost,
-           recording);
-    Button(ID_CLIP, S(276, 624, 112, 44), L"Snap Clip", BtnStyle::Ghost,
-           recording && settings_.replay);
-    Button(ID_OPENLOGS, S(400, 624, 86, 44), L"Logs", BtnStyle::Ghost);
-    Button(ID_REPORT, S(494, 624, 116, 44), L"Report Bug", BtnStyle::Ghost);
-    Button(ID_OPENFOLDER, S(908, 624, 132, 44), L"Open Folder", BtnStyle::Ghost,
-           settings_.record);
+void UiApp::DrawTransport(int mode) {
+    const bool rec = stats_.recording;
+    const bool live = stats_.streaming;
+    const bool active = rec || live;
+    float x = 20;
+    if (mode != 1) {
+        Button(ID_REC, S(x, 640, 176, 44), rec ? L"Stop Recording" : L"Start Recording",
+               rec ? BtnStyle::Danger : BtnStyle::Primary);
+        x += 184;
+    }
+    if (mode != 0) {
+        Button(ID_LIVE, S(x, 640, 156, 44), live ? L"End Stream" : L"Go Live",
+               live ? BtnStyle::Danger : BtnStyle::Primary);
+        x += 164;
+    }
+    Button(ID_PAUSE, S(x, 640, 100, 44), stats_.paused ? L"Resume" : L"Pause", BtnStyle::Ghost,
+           active);
+    x += 108;
+    Button(ID_CLIP, S(x, 640, 112, 44), L"Snap Clip", BtnStyle::Ghost, stats_.replayArmed);
+    if (mode != 1) Button(ID_OPENFOLDER, S(x + 120, 640, 132, 44), L"Open Folder", BtnStyle::Ghost);
+    Button(ID_OPENLOGS, S(830, 640, 86, 44), L"Logs", BtnStyle::Ghost);
+    Button(ID_REPORT, S(924, 640, 116, 44), L"Report Bug", BtnStyle::Ghost);
 }
 
 void UiApp::DrawActivityStrip() {
-    D2D1_RECT_F r = S(320, 559, 720, 28);
+    D2D1_RECT_F r = S(320, 604, 720, 28);
     std::vector<std::wstring> lines;
     {
         std::lock_guard<std::mutex> lock(logMu_);
@@ -1514,6 +1905,7 @@ void UiApp::ReloadDevices() {
         gpuNvenc_.push_back(nv);
     }
     rates_ = {L"Quality (CQ)", L"CBR (bitrate)"};
+    streamCodecs_ = {L"H.264 (all platforms)", L"HEVC (YouTube etc.)"};
 
     // No implicit game hooking: WGC is the default; DXGI is an explicit choice.
     backends_ = {L"WGC (desktop)", L"DXGI (fullscreen games)"};
@@ -1556,6 +1948,7 @@ void UiApp::ApplySettingsToUi() {
     micGainPct_ = (int)std::lround(settings_.micGain * 100.0f);
     deskGainPct_ = (int)std::lround(settings_.desktopGain * 100.0f);
     selRate_ = settings_.recordCbr ? 1 : 0;
+    selStreamCodec_ = settings_.streamHevc ? 1 : 0;
 
     auto find = [](const std::vector<std::wstring>& list, const std::wstring& needle) {
         if (needle.empty()) return 0;
@@ -1583,23 +1976,32 @@ void UiApp::ApplySettingsToUi() {
         if (gpuValues_[i] == settings_.gpu) selGpu_ = (int)i;
     if (!settings_.windowTitle.empty()) selWindow_ = find(windows_, Widen(settings_.windowTitle));
 
-    // scenes
+    // scenes (each with its own source list)
     scenes_.clear();
     for (const UiSceneSetting& s : settings_.scenes) {
         UiScene us;
         us.name = Widen(s.name.empty() ? "Scene" : s.name);
-        us.capture = s.capture != 0;
-        us.webcam = s.webcam != 0;
-        us.browser = s.browser != 0;
         us.cursor = s.cursor != 0;
-        us.corner = (s.corner >= 0 && s.corner < (int)posKeys_.size()) ? s.corner : 3;
-        us.camX = s.camX;
-        us.camY = s.camY;
+        for (const UiSourceSetting& ss : s.sources) {
+            UiSource u;
+            u.type = (SessionSourceType)std::clamp(ss.type, 0, 4);
+            u.enabled = ss.enabled != 0;
+            u.device = ss.device;
+            u.monitor = ss.monitor;
+            u.window = Widen(ss.window);
+            u.dxgi = ss.dxgi != 0;
+            u.corner = (ss.corner >= 0 && ss.corner < 4) ? ss.corner : 3;
+            u.camX = ss.camX;
+            u.camY = ss.camY;
+            us.sources.push_back(u);
+        }
+        EnsureSceneDefaults(us);
         scenes_.push_back(us);
     }
     if (scenes_.empty()) {
         UiScene us;
         us.name = L"Game";
+        EnsureSceneDefaults(us);
         scenes_.push_back(us);
     }
     activeScene_ = settings_.activeScene;
@@ -1621,6 +2023,7 @@ void UiApp::SyncSettingsFromUi() {
     settings_.recordBitrate = (uint32_t)(std::max)(1000, _wtoi(bitrateText_.c_str()));
     settings_.streamBitrate =
         (uint32_t)std::clamp(_wtoi(streamBitrateText_.c_str()), 100, 200000);
+    settings_.streamHevc = selStreamCodec_ == 1;
     settings_.micGain = micGainPct_ / 100.0f;
     settings_.desktopGain = deskGainPct_ / 100.0f;
     settings_.desktopDevice = (selDesk_ > 0 && selDesk_ < (int)desktops_.size())
@@ -1642,13 +2045,20 @@ void UiApp::SyncSettingsFromUi() {
     for (const UiScene& s : scenes_) {
         UiSceneSetting us;
         us.name = Narrow(s.name.empty() ? L"Scene" : s.name);
-        us.capture = s.capture ? 1 : 0;
-        us.webcam = s.webcam ? 1 : 0;
-        us.browser = s.browser ? 1 : 0;
         us.cursor = s.cursor ? 1 : 0;
-        us.corner = s.corner;
-        us.camX = s.camX;
-        us.camY = s.camY;
+        for (const UiSource& src : s.sources) {
+            UiSourceSetting ss;
+            ss.type = (int)src.type;
+            ss.enabled = src.enabled ? 1 : 0;
+            ss.device = src.device;
+            ss.monitor = src.monitor;
+            ss.window = Narrow(src.window);
+            ss.dxgi = src.dxgi ? 1 : 0;
+            ss.corner = src.corner;
+            ss.camX = src.camX;
+            ss.camY = src.camY;
+            us.sources.push_back(ss);
+        }
         settings_.scenes.push_back(us);
     }
     settings_.activeScene = activeScene_;
@@ -1665,39 +2075,75 @@ void UiApp::SyncSceneName() {
 
 bool UiApp::SceneUsesWebcam() const {
     for (const UiScene& s : scenes_)
-        if (s.webcam) return true;
+        for (const UiSource& src : s.sources)
+            if (src.type == SessionSourceType::Webcam && src.enabled) return true;
     return false;
 }
 
 bool UiApp::SceneUsesBrowser() const {
     for (const UiScene& s : scenes_)
-        if (s.browser) return true;
+        for (const UiSource& src : s.sources)
+            if (src.type == SessionSourceType::Browser && src.enabled) return true;
     return false;
+}
+
+std::vector<SessionSource> UiApp::SceneSources(const UiScene& sc) const {
+    std::vector<SessionSource> out;
+    for (const UiSource& s : sc.sources) {
+        SessionSource ss;
+        ss.type = s.type;
+        ss.enabled = s.enabled;
+        ss.device = s.device;
+        ss.monitor = s.monitor;
+        ss.window = s.window;
+        ss.dxgi = s.dxgi;
+        ss.corner = s.corner;
+        ss.xr = s.camX;
+        ss.yr = s.camY;
+        ss.audioDevice = Widen(s.device);
+        out.push_back(ss);
+    }
+    return out;
+}
+
+void UiApp::EnsureSceneDefaults(UiScene& scene) const {
+    bool hasCap = false, hasOut = false;
+    for (const UiSource& s : scene.sources) {
+        if (s.type == SessionSourceType::Capture) hasCap = true;
+        if (s.type == SessionSourceType::AudioOut) hasOut = true;
+    }
+    if (!hasCap) {
+        UiSource c;
+        c.type = SessionSourceType::Capture;
+        c.enabled = true;
+        c.monitor = selMonitor_;
+        if (selWindow_ > 0 && selWindow_ < (int)windows_.size()) c.window = windows_[selWindow_];
+        if (selBackend_ >= 0 && selBackend_ < (int)backendKeys_.size())
+            c.dxgi = backendKeys_[selBackend_] == "dxgi";
+        scene.sources.insert(scene.sources.begin(), c);
+    }
+    if (!hasOut) {
+        UiSource a;
+        a.type = SessionSourceType::AudioOut;
+        a.enabled = settings_.desktopAudio;
+        a.device = settings_.desktopDevice;
+        scene.sources.push_back(a);
+    }
 }
 
 void UiApp::PushSceneSources() {
     if (!sessionRunning_ || scenes_.empty()) return;
     const UiScene& sc = scenes_[activeScene_];
-    std::vector<SessionSource> sources;
-    SessionSource cap;
-    cap.type = SessionSourceType::Capture;
-    cap.enabled = sc.capture;
-    sources.push_back(cap);
-    if (sc.webcam) {
-        SessionSource w;
-        w.type = SessionSourceType::Webcam;
-        w.xr = sc.camX;
-        w.yr = sc.camY;
-        sources.push_back(w);
-    }
-    if (sc.browser) {
-        SessionSource b;
-        b.type = SessionSourceType::Browser;
-        sources.push_back(b);
-    }
-    const int corner = (sc.corner >= 0 && sc.corner < (int)posKeys_.size()) ? sc.corner : 3;
-    session_.SetSources(std::move(sources), posKeys_[corner]);
+    session_.SetSources(SceneSources(sc), "");
     session_.SetCursorVisible(sc.cursor);
+    // Audio sources: enable/disable live (device changes apply on next start).
+    bool aIn = false, aOut = false;
+    for (const UiSource& s : sc.sources) {
+        if (!s.enabled) continue;
+        if (s.type == SessionSourceType::AudioIn) aIn = true;
+        if (s.type == SessionSourceType::AudioOut) aOut = true;
+    }
+    session_.SetAudioSourcesLive(aOut, aIn);
 }
 
 void UiApp::ApplyLiveScene() {
@@ -1710,9 +2156,9 @@ void UiApp::ApplyLiveScene() {
     // Pipelines are decided at Start; tell the user if a newly added source
     // can't appear until the next Start.
     const Session::Stats st = session_.GetStats();
-    if (sc.webcam && st.webcamName.empty())
-        AddLog(L"Webcam source added — press Stop/Start to switch the camera on");
-    if (sc.browser && !st.browserActive)
+    if (SceneUsesWebcam() && st.webcamName.empty())
+        AddLog(L"Video source added — press Stop/Start to switch the device on");
+    if (SceneUsesBrowser() && !st.browserActive)
         AddLog(L"Browser source added — press Stop/Start to load it");
 }
 
@@ -1733,9 +2179,18 @@ std::string UiApp::BuildStreamUrl() {
 SessionConfig UiApp::BuildConfig() {
     SyncSettingsFromUi();
     SessionConfig cfg;
-    cfg.monitor = selMonitor_;
-    if (selWindow_ > 0 && selWindow_ < (int)windows_.size()) cfg.window = windows_[selWindow_];
-    cfg.backend = settings_.backend;
+    const UiScene& sc = scenes_[activeScene_];
+    // Capture source (monitor / window / DXGI) comes from the active scene.
+    cfg.monitor = 0;
+    cfg.window.clear();
+    cfg.backend = "wgc";
+    for (const UiSource& s : sc.sources) {
+        if (s.type != SessionSourceType::Capture || !s.enabled) continue;
+        cfg.monitor = s.monitor;
+        cfg.window = s.window;
+        cfg.backend = s.dxgi ? "dxgi" : "wgc";
+        break;
+    }
     cfg.adapter = settings_.gpu;
     cfg.fps = settings_.fps;
     cfg.record = settings_.record;
@@ -1743,7 +2198,8 @@ SessionConfig UiApp::BuildConfig() {
     cfg.stream = settings_.stream;
     cfg.streamUrl = BuildStreamUrl();
     cfg.streamBitrate = settings_.streamBitrate;
-    cfg.reconnect = 5;
+    cfg.streamHevc = settings_.streamHevc;
+    cfg.reconnect = settings_.streamReconnect;
     cfg.hevc = settings_.hevc;
     cfg.cqp = settings_.cqp;
     cfg.recordCbr = settings_.recordCbr;
@@ -1752,12 +2208,19 @@ SessionConfig UiApp::BuildConfig() {
     cfg.lookahead = settings_.lookahead;
     cfg.multipass = settings_.multipass;
     cfg.preset = settings_.preset;
-    cfg.audio.desktop = settings_.desktopAudio;
-    cfg.audio.mic = settings_.mic;
-    cfg.audio.desktopDevice =
-        settings_.desktopDevice.empty() ? L"default" : Widen(settings_.desktopDevice);
-    cfg.audio.micDevice =
-        (selMic_ > 0 && selMic_ < (int)mics_.size()) ? mics_[selMic_] : L"default";
+    // Audio sources come from the scene (devices per source).
+    cfg.audio.desktop = false;
+    cfg.audio.mic = false;
+    for (const UiSource& s : sc.sources) {
+        if (!s.enabled) continue;
+        if (s.type == SessionSourceType::AudioOut) {
+            cfg.audio.desktop = true;
+            cfg.audio.desktopDevice = s.device.empty() ? L"default" : Widen(s.device);
+        } else if (s.type == SessionSourceType::AudioIn) {
+            cfg.audio.mic = true;
+            cfg.audio.micDevice = s.device.empty() ? L"default" : Widen(s.device);
+        }
+    }
     cfg.audio.micGain = settings_.micGain;
     cfg.audio.desktopGain = settings_.desktopGain;
     cfg.audio.tracks = 1;
@@ -1775,29 +2238,8 @@ SessionConfig UiApp::BuildConfig() {
     cfg.chromaColor = settings_.chromaColor;
     cfg.chromaLayer = 0;  // UI keys the webcam overlay
 
-    const UiScene& sc = scenes_[activeScene_];
-    cfg.webcamPos =
-        posKeys_[(sc.corner >= 0 && sc.corner < (int)posKeys_.size()) ? sc.corner : 3];
     cfg.showCursor = sc.cursor;
-    cfg.sources.clear();
-    {
-        SessionSource cap;
-        cap.type = SessionSourceType::Capture;
-        cap.enabled = sc.capture;
-        cfg.sources.push_back(cap);
-    }
-    if (sc.webcam) {
-        SessionSource w;
-        w.type = SessionSourceType::Webcam;
-        w.xr = sc.camX;
-        w.yr = sc.camY;
-        cfg.sources.push_back(w);
-    }
-    if (sc.browser) {
-        SessionSource b;
-        b.type = SessionSourceType::Browser;
-        cfg.sources.push_back(b);
-    }
+    cfg.sources = SceneSources(sc);
     return cfg;
 }
 
@@ -1807,22 +2249,17 @@ void UiApp::AddLog(const std::wstring& s) {
     if (logLines_.size() > 50) logLines_.pop_front();
 }
 
-void UiApp::StartSession() {
+void UiApp::StartSession(bool record, bool stream) {
     SyncSettingsFromUi();
     SaveUiSettings(settings_);
 
-    if (!settings_.record && !settings_.stream && !settings_.replay) {
-        statusText_ = L"Enable Record, Go Live or Replay first";
+    if (stream && selPlatform_ != 3 && keyText_.empty()) {
+        statusText_ = L"Enter a stream key in Setup to go live";
         statusError_ = true;
         return;
     }
-    if (settings_.stream && selPlatform_ != 3 && keyText_.empty()) {
-        statusText_ = L"Enter a stream key to go live";
-        statusError_ = true;
-        return;
-    }
-    if (settings_.stream && selPlatform_ == 3 && urlText_.empty()) {
-        statusText_ = L"Enter the RTMP ingest URL";
+    if (stream && selPlatform_ == 3 && urlText_.empty()) {
+        statusText_ = L"Enter the RTMP ingest URL in Setup to go live";
         statusError_ = true;
         return;
     }
@@ -1851,6 +2288,9 @@ void UiApp::StartSession() {
     StopPreview();
 
     SessionConfig cfg = BuildConfig();
+    cfg.record = record;
+    cfg.stream = stream;
+    cfg.replay = settings_.replay;  // replay arms with any session when enabled
     std::string err;
     if (!session_.Start(cfg, &err)) {
         statusText_ = Widen(err);
@@ -1859,8 +2299,56 @@ void UiApp::StartSession() {
     } else {
         statusText_.clear();
         statusError_ = false;
-        AddLog(settings_.stream ? L"Recording + streaming started" : L"Recording started");
+        if (record && stream)
+            AddLog(L"Recording + streaming started");
+        else if (record)
+            AddLog(L"Recording started");
+        else if (stream)
+            AddLog(L"Streaming started");
+        else
+            AddLog(L"Replay buffer armed");
     }
+}
+
+void UiApp::RecordPressed() {
+    if (stats_.recording) {
+        session_.DisableRecording();
+        if (!stats_.streaming && !stats_.replayArmed) StopSession();
+        return;
+    }
+    if (!sessionRunning_) {
+        StartSession(true, false);
+        return;
+    }
+    // A session is already running (streaming/replay): add the file output live.
+    session_.EnableRecording(settings_.recordPath);
+    statusText_ = L"Recording…";
+    statusError_ = false;
+}
+
+void UiApp::GoLivePressed() {
+    if (stats_.streaming) {
+        session_.DisableStreaming();
+        if (!stats_.recording && !stats_.replayArmed) StopSession();
+        return;
+    }
+    if (selPlatform_ != 3 && keyText_.empty()) {
+        statusText_ = L"Enter a stream key in Setup to go live";
+        statusError_ = true;
+        return;
+    }
+    if (selPlatform_ == 3 && urlText_.empty()) {
+        statusText_ = L"Enter the RTMP ingest URL in Setup to go live";
+        statusError_ = true;
+        return;
+    }
+    if (!sessionRunning_) {
+        StartSession(false, true);
+        return;
+    }
+    session_.EnableStreaming(BuildStreamUrl(), settings_.streamBitrate);
+    statusText_ = L"Going live…";
+    statusError_ = false;
 }
 
 void UiApp::StopSession() {
@@ -1875,17 +2363,19 @@ void UiApp::StopSession() {
 void UiApp::StartPreview() {
     if (sessionRunning_ || !settings_.idlePreview) return;
     SessionConfig cfg = BuildConfig();
-    // Preview only: capture + composite + the shared preview texture. No audio,
-    // no camera (it stays free for OBS/Broadcast), no encoders or muxers.
+    // Preview only: capture + composite + the shared preview texture. No file or
+    // stream outputs. The camera/browser/audio start only when the replay buffer
+    // is armed (it is an output: clips need the full scene).
+    const bool replayOn = settings_.replay;
     cfg.record = false;
     cfg.stream = false;
-    cfg.replay = false;
-    cfg.noAudio = true;
-    cfg.audio.desktop = false;
-    cfg.audio.mic = false;
-    cfg.webcam = false;
-    cfg.browser = false;
-    cfg.browserUrl.clear();
+    cfg.replay = replayOn;
+    cfg.noAudio = !replayOn;
+    cfg.audio.desktop = replayOn && settings_.desktopAudio;
+    cfg.audio.mic = replayOn && settings_.mic;
+    cfg.webcam = replayOn && SceneUsesWebcam();
+    cfg.browser = replayOn && SceneUsesBrowser() && !browserText_.empty();
+    if (!cfg.browser) cfg.browserUrl.clear();
     std::string err;
     if (!session_.Start(cfg, &err)) {
         AddLog(L"Preview: " + Widen(err));
@@ -1909,11 +2399,20 @@ void UiApp::RestartPreview() {
 
 void UiApp::UpdateWindowTitleState() {
     std::wstring t = L"Ulticast";
-    if (previewSession_)
-        t += L" — preview";
-    else if (sessionRunning_)
+    if (stats_.recording && stats_.streaming)
+        t += L" — recording + live";
+    else if (stats_.recording)
         t += stats_.paused ? L" — paused" : L" — recording";
-    SetWindowTextW(hwnd_, t.c_str());
+    else if (stats_.streaming)
+        t += L" — live";
+    else if (stats_.replayArmed)
+        t += L" — replay buffer";
+    else if (previewSession_)
+        t += L" — preview";
+    if (t != lastTitle_) {
+        lastTitle_ = t;
+        SetWindowTextW(hwnd_, t.c_str());
+    }
 }
 
 void UiApp::OnAction(int id) {
@@ -1928,22 +2427,52 @@ void UiApp::OnAction(int id) {
         InvalidateRect(hwnd_, nullptr, FALSE);
         return;
     }
-    if (id >= ID_ITEM_BASE) {
+    if (id >= ID_SRC_PROP_BASE && id < ID_SRC_PROP_BASE + 64) {
+        const int i = id - ID_SRC_PROP_BASE;
+        if (i >= 0 && i < (int)scenes_[activeScene_].sources.size()) {
+            BuildSourceProperties(i);
+            actionSource_ = i;
+            openAction_ = ID_SRC_PROP_BASE + i;
+            actionRect_ = (i < (int)sourceRowRects_.size()) ? sourceRowRects_[i]
+                                                            : D2D1::RectF();
+        }
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+    if (id >= ID_ITEM_BASE && id < ID_ITEM_BASE + 64) {
         int index = id - ID_ITEM_BASE;
-        if (openCombo_ >= 0 && index >= 0 && index < (int)popup_.items.size()) {
-            if (popup_.sel) *popup_.sel = index;
-            if (openCombo_ == ID_COMBO_CORNER) {
-                // picking a preset clears the dragged free position
-                if (!scenes_.empty()) scenes_[activeScene_].camX = scenes_[activeScene_].camY = -1;
-                ApplyLiveScene();
+        if (openAction_) {
+            const int act = openAction_;
+            openAction_ = 0;
+            if (act == ID_ADD_SOURCE) {
+                AddSourceAt(index);
+            } else if (act == ID_WINDOW_PICK) {
+                if (actionSource_ >= 0 &&
+                    actionSource_ < (int)scenes_[activeScene_].sources.size() &&
+                    index >= 0 && index < (int)windowPickItems_.size()) {
+                    UiSource& s = scenes_[activeScene_].sources[actionSource_];
+                    s.window = index == 0 ? std::wstring() : windowPickItems_[index];
+                    SyncSettingsFromUi();
+                    SaveUiSettings(settings_);
+                    PushSceneSources();
+                    RestartPreview();
+                    if (sessionRunning_ && !previewSession_) {
+                        statusText_ = L"Capture source changed — press Stop/Start to apply";
+                        statusError_ = false;
+                    }
+                }
+            } else {
+                ApplySourceProperty(act - ID_SRC_PROP_BASE, index);
             }
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
+            if (openCombo_ >= 0 && index >= 0 && index < (int)popup_.items.size()) {
+            if (popup_.sel) *popup_.sel = index;
             if (openCombo_ == ID_COMBO_MONITOR || openCombo_ == ID_COMBO_WINDOW ||
                 openCombo_ == ID_COMBO_BACKEND || openCombo_ == ID_COMBO_FPS ||
                 openCombo_ == ID_COMBO_GPU)
                 RestartPreview();
-            if (openCombo_ == ID_COMBO_WINDOW) {
-                // refresh window list on demand
-            }
         }
         openCombo_ = -1;
         InvalidateRect(hwnd_, nullptr, FALSE);
@@ -1951,20 +2480,29 @@ void UiApp::OnAction(int id) {
     }
 
     switch (id) {
-        case ID_START:
-            if (sessionRunning_ && !previewSession_)
-                StopSession();
-            else
-                StartSession();
+        case ID_REC:
+            RecordPressed();
+            break;
+        case ID_LIVE:
+            GoLivePressed();
             break;
         case ID_PAUSE:
-            session_.SetPaused(!session_.Paused());
+            if (stats_.recording || stats_.streaming)
+                session_.SetPaused(!session_.Paused());
             break;
         case ID_CLIP:
-            session_.SaveClip();
+            if (stats_.replayArmed)
+                session_.SaveClip();
+            else {
+                statusText_ = L"Replay is off — enable it in Setup > Clips";
+                statusError_ = true;
+            }
             break;
-        case ID_BROWSE: {
-            wchar_t file[MAX_PATH] = {};
+        case ID_ADD_SOURCE:
+            openAction_ = ID_ADD_SOURCE;
+            actionRect_ = addMenuRect_;
+            break;
+        case ID_BROWSE: {            wchar_t file[MAX_PATH] = {};
             MultiByteToWideChar(CP_UTF8, 0, settings_.recordPath.c_str(), -1, file, MAX_PATH);
             OPENFILENAMEW ofn{};
             ofn.lStructSize = sizeof(ofn);
@@ -2000,18 +2538,30 @@ void UiApp::OnAction(int id) {
                           nullptr, nullptr, SW_SHOWNORMAL);
             break;
         }
+        case ID_TOGGLE_REPLAY:
+            // The Replay toggle arms/disarms the rolling buffer live. Arming it
+            // with no session starts one (replay is an output: the scene needs
+            // the camera/browser pipelines running).
+            if (settings_.replay) {
+                if (!sessionRunning_)
+                    StartSession(false, false);
+                else
+                    session_.EnableReplay(settings_.replaySeconds, settings_.replayPrefix);
+                statusText_ = L"Replay buffer armed";
+                statusError_ = false;
+            } else {
+                session_.DisableReplay();
+                if (sessionRunning_ && !stats_.recording && !stats_.streaming) StopSession();
+                statusText_ = L"Replay buffer off";
+                statusError_ = false;
+            }
+            break;
         case ID_TOGGLE_RECORD:
         case ID_TOGGLE_STREAM:
         case ID_TOGGLE_WEBCAM:
         case ID_TOGGLE_DESKTOP:
         case ID_TOGGLE_MIC:
-        case ID_TOGGLE_REPLAY:
             // value already toggled by the widget handler
-            if (id == ID_TOGGLE_STREAM && settings_.stream && selPlatform_ != 3 &&
-                keyText_.empty()) {
-                statusText_ = L"Enter a stream key first";
-                statusError_ = true;
-            }
             break;
         case ID_TOGGLE_IDLEPREVIEW:
             if (settings_.idlePreview) {
@@ -2021,9 +2571,14 @@ void UiApp::OnAction(int id) {
             }
             break;
         case ID_TAB_LIVE:
+        case ID_TAB_RECORD:
             page_ = 0;
             break;
         case ID_TAB_SETUP:
+        case ID_TAB_SETTINGS:
+            page_ = 2;
+            break;
+        case ID_TAB_STREAM:
             page_ = 1;
             break;
         case ID_SCENE_ADD:
@@ -2079,15 +2634,16 @@ void UiApp::ShowTrayMenu() {
     POINT pt{};
     GetCursorPos(&pt);
     HMENU menu = CreatePopupMenu();
-    const bool recording = sessionRunning_ && !previewSession_;
+    const bool active = stats_.recording || stats_.streaming;
     AppendMenuW(menu, MF_STRING, ID_TRAY_SHOW, L"Show Ulticast");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING | (recording ? MF_GRAYED : 0), ID_TRAY_START, L"Start");
-    AppendMenuW(menu, MF_STRING | (!recording ? MF_GRAYED : 0), ID_TRAY_START + 100, L"Stop");
-    AppendMenuW(menu, MF_STRING | (!recording ? MF_GRAYED : 0), ID_TRAY_PAUSE,
+    AppendMenuW(menu, MF_STRING, ID_TRAY_REC,
+                stats_.recording ? L"Stop Recording" : L"Start Recording");
+    AppendMenuW(menu, MF_STRING, ID_TRAY_LIVE, stats_.streaming ? L"End Stream" : L"Go Live");
+    AppendMenuW(menu, MF_STRING | (!active ? MF_GRAYED : 0), ID_TRAY_PAUSE,
                 stats_.paused ? L"Resume" : L"Pause");
-    AppendMenuW(menu, MF_STRING | (!recording || !settings_.replay ? MF_GRAYED : 0),
-                ID_TRAY_CLIP, L"Snap Clip");
+    AppendMenuW(menu, MF_STRING | (!stats_.replayArmed ? MF_GRAYED : 0), ID_TRAY_CLIP,
+                L"Snap Clip");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, L"Exit");
 
@@ -2103,17 +2659,17 @@ void UiApp::OnTrayCommand(int id) {
             ShowWindow(hwnd_, SW_SHOW);
             SetForegroundWindow(hwnd_);
             break;
-        case ID_TRAY_START:
-            StartSession();
+        case ID_TRAY_REC:
+            RecordPressed();
             break;
-        case ID_TRAY_START + 100:
-            StopSession();
+        case ID_TRAY_LIVE:
+            GoLivePressed();
             break;
         case ID_TRAY_PAUSE:
-            if (sessionRunning_ && !previewSession_) session_.SetPaused(!session_.Paused());
+            if (stats_.recording || stats_.streaming) session_.SetPaused(!session_.Paused());
             break;
         case ID_TRAY_CLIP:
-            session_.SaveClip();
+            if (stats_.replayArmed) session_.SaveClip();
             break;
         case ID_TRAY_EXIT:
             exiting_ = true;
@@ -2233,10 +2789,13 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 float cy = ((y - dragOffY_) - oy) / sc;
                 cx = std::clamp(cx, 0.f, (std::max)(0.f, canvasW - camW));
                 cy = std::clamp(cy, 0.f, (std::max)(0.f, canvasH - camH));
-                scenes_[activeScene_].camX = cx / canvasW;
-                scenes_[activeScene_].camY = cy / canvasH;
-                PushSceneSources();
-                InvalidateRect(hwnd, nullptr, FALSE);
+                const int vi = FirstVideoSourceIndex();
+                if (vi >= 0) {
+                    scenes_[activeScene_].sources[vi].camX = cx / canvasW;
+                    scenes_[activeScene_].sources[vi].camY = cy / canvasH;
+                    PushSceneSources();
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
             }
             return 0;
         }
@@ -2252,7 +2811,7 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             if (press_ == ID_SLIDER_CQP || press_ == ID_SLIDER_REPLAY ||
                 press_ == ID_SLIDER_BFRAMES || press_ == ID_SLIDER_MICGAIN ||
-                press_ == ID_SLIDER_DESKGAIN) {
+                press_ == ID_SLIDER_DESKGAIN || press_ == ID_SLIDER_RECONNECT) {
                 dragging_ = press_;
                 SetSliderFromX(press_, x);
             }
@@ -2282,8 +2841,7 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             for (int tid : {ID_TOGGLE_RECORD, ID_TOGGLE_STREAM, ID_TOGGLE_WEBCAM, ID_TOGGLE_DESKTOP,
                             ID_TOGGLE_MIC, ID_TOGGLE_REPLAY, ID_TOGGLE_CHROMA,
                             ID_TOGGLE_BROWSER, ID_TOGGLE_LOOKAHEAD, ID_TOGGLE_MULTIPASS,
-                            ID_TOGGLE_IDLEPREVIEW, ID_TOGGLE_TRAYCLOSE, ID_SRC_CAPTURE,
-                            ID_SRC_WEBCAM, ID_SRC_BROWSER, ID_SRC_CURSOR}) {
+                            ID_TOGGLE_IDLEPREVIEW, ID_TOGGLE_TRAYCLOSE, ID_SRC_CURSOR}) {
                 if (press_ == tid) {
                     bool* target = nullptr;
                     switch (tid) {
@@ -2299,15 +2857,29 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         case ID_TOGGLE_MULTIPASS: target = &settings_.multipass; break;
                         case ID_TOGGLE_IDLEPREVIEW: target = &settings_.idlePreview; break;
                         case ID_TOGGLE_TRAYCLOSE: target = &settings_.closeToTray; break;
-                        case ID_SRC_CAPTURE: target = &scenes_[activeScene_].capture; break;
-                        case ID_SRC_WEBCAM: target = &scenes_[activeScene_].webcam; break;
-                        case ID_SRC_BROWSER: target = &scenes_[activeScene_].browser; break;
                         case ID_SRC_CURSOR: target = &scenes_[activeScene_].cursor; break;
                     }
                     if (target) *target = !*target;
                     OnAction(tid);
                     press_ = 0;
                 }
+            }
+
+            // scene source rows: enable/disable applies immediately
+            if (press_ >= ID_SRC_TOGGLE_BASE && press_ < ID_SRC_TOGGLE_BASE + 64) {
+                const int i = press_ - ID_SRC_TOGGLE_BASE;
+                UiScene& sc = scenes_[activeScene_];
+                if (i >= 0 && i < (int)sc.sources.size()) {
+                    sc.sources[i].enabled = !sc.sources[i].enabled;
+                    PushSceneSources();
+                    if (sc.sources[i].enabled && sc.sources[i].type == SessionSourceType::Webcam &&
+                        sessionRunning_ && !previewSession_) {
+                        statusText_ =
+                            L"Video source on — press Stop/Start to switch the device on";
+                        statusError_ = false;
+                    }
+                }
+                press_ = 0;
             }
 
             // combos open/close

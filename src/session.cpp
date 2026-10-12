@@ -84,6 +84,11 @@ bool Session::Start(const SessionConfig& cfg, std::string* err) {
         if (cfg_.webcam) {
             SessionSource w;
             w.type = SessionSourceType::Webcam;
+            w.device = Narrow(cfg_.webcamDevice);
+            if (cfg_.webcamPos == "topleft") w.corner = 0;
+            else if (cfg_.webcamPos == "topright") w.corner = 1;
+            else if (cfg_.webcamPos == "bottomleft") w.corner = 2;
+            else w.corner = 3;
             cfg_.sources.push_back(w);
         }
         if (cfg_.browser) {
@@ -98,6 +103,18 @@ bool Session::Start(const SessionConfig& cfg, std::string* err) {
         liveWebcamPos_ = cfg_.webcamPos;
     }
     showCursorLive_.store(cfg_.showCursor);
+
+    // Live output state: the UI can switch recording/streaming/replay on and
+    // off at runtime; Start() only sets the initial state.
+    recOn_ = cfg_.record;
+    strOn_ = cfg_.stream;
+    recBaseFrames_ = strBaseFrames_ = 0;
+    recBaseAudio_ = strBaseAudio_ = 0;
+    lastAudioPts_ = 0;
+    {
+        std::lock_guard<std::mutex> lk(cmdMu_);
+        cmds_.clear();
+    }
 
     // Chroma key color (RRGGBB -> floats)
     keyR_ = 0.f;
@@ -168,15 +185,7 @@ bool Session::Start(const SessionConfig& cfg, std::string* err) {
         }
     }
 
-    webcamOn_ = false;
-    if (cfg_.webcam) {
-        std::string e;
-        if (!webcam_.Start(cfg_.webcamDevice, &e)) {
-            Log("[webcam] disabled: %s", e.c_str());
-        } else {
-            webcamOn_ = true;
-        }
-    }
+    StartVideoSources();
 
     t0_ = std::chrono::steady_clock::now();
     lastElapsed_ = 0.0;
@@ -188,6 +197,12 @@ bool Session::Start(const SessionConfig& cfg, std::string* err) {
 void Session::Stop() {
     bool wasRunning = running_.exchange(false);
     stop_ = true;
+    {
+        std::lock_guard<std::mutex> lk(cmdMu_);
+        cmds_.clear();
+    }
+    recOn_ = false;
+    strOn_ = false;
     if (wasRunning)
         lastElapsed_ = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0_).count();
 
@@ -198,7 +213,13 @@ void Session::Stop() {
     cap_.Stop();
     mixer_.Stop();
     dup_.Stop();
-    webcam_.Stop();
+    for (auto& v : videos_) {
+        if (v.cam) v.cam->Stop();
+        v.cam.reset();
+        v.tex.Reset();
+        v.srv.Reset();
+    }
+    videos_.clear();
     webcamOn_ = false;
     browser_.Stop();
     browserOn_ = false;
@@ -228,8 +249,266 @@ void Session::SetSources(std::vector<SessionSource> sources, std::string webcamP
     liveWebcamPos_ = std::move(webcamPos);
 }
 
+// ------------------------------------------------------------ runtime outputs
+
+void Session::EnableRecording(const std::string& path) {
+    std::lock_guard<std::mutex> lk(cmdMu_);
+    OutCmd c;
+    c.type = OutCmdType::RecOn;
+    c.arg = path;
+    cmds_.push_back(std::move(c));
+}
+
+void Session::DisableRecording() {
+    std::lock_guard<std::mutex> lk(cmdMu_);
+    OutCmd c;
+    c.type = OutCmdType::RecOff;
+    cmds_.push_back(std::move(c));
+}
+
+void Session::EnableStreaming(const std::string& url, uint32_t bitrateKbps) {
+    std::lock_guard<std::mutex> lk(cmdMu_);
+    OutCmd c;
+    c.type = OutCmdType::StrOn;
+    c.arg = url;
+    c.bitrate = bitrateKbps;
+    cmds_.push_back(std::move(c));
+}
+
+void Session::DisableStreaming() {
+    std::lock_guard<std::mutex> lk(cmdMu_);
+    OutCmd c;
+    c.type = OutCmdType::StrOff;
+    cmds_.push_back(std::move(c));
+}
+
+void Session::EnableReplay(int seconds, const std::string& prefix) {
+    std::lock_guard<std::mutex> lk(cmdMu_);
+    OutCmd c;
+    c.type = OutCmdType::RepOn;
+    c.arg = prefix;
+    c.seconds = seconds;
+    cmds_.push_back(std::move(c));
+}
+
+void Session::DisableReplay() {
+    std::lock_guard<std::mutex> lk(cmdMu_);
+    OutCmd c;
+    c.type = OutCmdType::RepOff;
+    cmds_.push_back(std::move(c));
+}
+
+void Session::StartVideoSources() {
+    videos_.clear();
+    for (const auto& s : cfg_.sources) {
+        if (s.type != SessionSourceType::Webcam || !s.enabled) continue;
+        VideoLayer v;
+        v.device = s.device;
+        v.cam = std::make_unique<WebcamCapture>();
+        const std::wstring match = s.device.empty() ? L"default" : Widen(s.device);
+        std::string e;
+        if (!v.cam->Start(match, &e)) {
+            Log("[video] disabled (%s): %s", s.device.empty() ? "default" : s.device.c_str(),
+                e.c_str());
+            v.cam.reset();
+        } else {
+            Log("[video] %ls", v.cam->ActiveDevice().c_str());
+        }
+        videos_.push_back(std::move(v));
+    }
+    webcamOn_ = false;
+    for (auto& v : videos_)
+        if (v.cam) webcamOn_ = true;
+}
+
+Session::VideoLayer* Session::FindVideo(const std::string& device) {
+    for (auto& v : videos_) {
+        if (v.cam && !device.empty() && v.device == device) return &v;
+    }
+    if (device.empty()) {
+        for (auto& v : videos_)
+            if (v.cam) return &v;
+    }
+    return nullptr;
+}
+
+void Session::ApplyOutputCommands() {
+    std::deque<OutCmd> todo;
+    {
+        std::lock_guard<std::mutex> lk(cmdMu_);
+        todo.swap(cmds_);
+    }
+    for (auto& c : todo) {
+        switch (c.type) {
+            case OutCmdType::RecOn: BeginRecording(c.arg); break;
+            case OutCmdType::RecOff: EndRecording(); break;
+            case OutCmdType::StrOn: BeginStreaming(c.arg, c.bitrate); break;
+            case OutCmdType::StrOff: EndStreaming(); break;
+            case OutCmdType::RepOn: BeginReplay(c.seconds, c.arg); break;
+            case OutCmdType::RepOff: EndReplay(); break;
+        }
+    }
+}
+
+bool Session::BeginRecording(const std::string& path) {
+    if (recOn_.load()) return true;
+    if (!inited_.load() || !tex_) {
+        Log("[record] not ready yet");
+        return false;
+    }
+    const uint32_t w = width_.load(), h = height_.load();
+    EncoderConfig rc = MakeEncoderConfig(w, h);
+    rc.hevc = cfg_.hevc;
+    rc.rateMode = cfg_.recordCbr ? EncoderConfig::RateMode::CBR : EncoderConfig::RateMode::CQ;
+    rc.cqp = cfg_.cqp;
+    rc.bitrateKbps = cfg_.recordBitrate;
+    rc.maxBitrateKbps = cfg_.recordBitrate;
+
+    std::string e;
+    if (!recEnc_.Init(d3d_.device.Get(), rc, &e)) {
+        Log("[record] start failed: %s", e.c_str());
+        return false;
+    }
+    if (!recEnc_.RegisterTexture(tex_.Get(), &e)) {
+        Log("[record] register failed: %s", e.c_str());
+        recEnc_.Shutdown();
+        return false;
+    }
+    recCfg_.width = (int)w;
+    recCfg_.height = (int)h;
+    recCfg_.fps = cfg_.fps;
+    recCfg_.hevc = cfg_.hevc;
+    recCfg_.videoExtradata = recEnc_.SequenceHeader();
+    recCfg_.audioTracks = 0;
+    if (audioReady_ && mixer_.AnyActive() && cfg_.audio.tracks > 0) {
+        recCfg_.audioTracks = (cfg_.audio.tracks == 2 && mixer_.MicActive()) ? 2 : 1;
+        recCfg_.audioExtradata = mixer_.MixExtradata();
+    }
+    const std::string out = path.empty() ? cfg_.recordPath : path;
+    if (!recMux_.Open(out, recCfg_, &e)) {
+        Log("[record] open failed: %s", e.c_str());
+        recEnc_.Shutdown();
+        return false;
+    }
+    // Fresh output: rebase video/audio timestamps so the file starts at zero.
+    recBaseFrames_ = (int64_t)vidOut_.load();
+    recBaseAudio_ = lastAudioPts_.load();
+    forceIdrRec_ = true;
+    recOn_ = true;
+    Log("[record] %s", out.c_str());
+    return true;
+}
+
+void Session::EndRecording() {
+    if (!recOn_.load()) return;
+    recOn_ = false;
+    recMux_.Close();
+    recEnc_.Shutdown();
+    Log("[record] stopped");
+}
+
+bool Session::BeginStreaming(const std::string& url, uint32_t bitrateKbps) {
+    if (strOn_.load()) return true;
+    if (!inited_.load() || !tex_) {
+        Log("[stream] not ready yet");
+        return false;
+    }
+    const uint32_t w = width_.load(), h = height_.load();
+    EncoderConfig sc = MakeEncoderConfig(w, h);
+    sc.hevc = cfg_.streamHevc;
+    sc.rateMode = EncoderConfig::RateMode::CBR;
+    sc.bitrateKbps = bitrateKbps ? bitrateKbps : cfg_.streamBitrate;
+    sc.maxBitrateKbps = sc.bitrateKbps;
+
+    std::string e;
+    if (!strEnc_.Init(d3d_.device.Get(), sc, &e)) {
+        Log("[stream] encoder failed: %s", e.c_str());
+        return false;
+    }
+    if (!strEnc_.RegisterTexture(tex_.Get(), &e)) {
+        Log("[stream] register failed: %s", e.c_str());
+        strEnc_.Shutdown();
+        return false;
+    }
+    strCfg_.width = (int)w;
+    strCfg_.height = (int)h;
+    strCfg_.fps = cfg_.fps;
+    strCfg_.hevc = cfg_.streamHevc;
+    strCfg_.videoExtradata = strEnc_.SequenceHeader();
+    strCfg_.audioTracks = 0;
+    if (audioReady_ && mixer_.AnyActive()) {
+        strCfg_.audioTracks = 1;
+        strCfg_.audioExtradata = mixer_.MixExtradata();
+    }
+    const std::string target = url.empty() ? cfg_.streamUrl : url;
+    bool opened = false;
+    for (int a = 1; a <= 3 && !stop_.load(); ++a) {
+        if (strMux_.Open(target, strCfg_, &e)) {
+            opened = true;
+            break;
+        }
+        Log("[stream] open failed: %s", e.c_str());
+        if (a < 3) std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+    if (!opened) {
+        strEnc_.Shutdown();
+        return false;
+    }
+    strBaseFrames_ = (int64_t)vidOut_.load();
+    strBaseAudio_ = lastAudioPts_.load();
+    forceIdrStr_ = true;
+    failures_ = 0;
+    recon_ = false;
+    strOn_ = true;
+    Log("[stream] %s", target.c_str());
+    return true;
+}
+
+void Session::EndStreaming() {
+    if (!strOn_.load()) return;
+    strOn_ = false;
+    recon_ = false;
+    strMux_.Close();
+    strEnc_.Shutdown();
+    Log("[stream] stopped");
+}
+
+bool Session::BeginReplay(int seconds, const std::string& prefix) {
+    if (replay_.Enabled()) return true;
+    if (!inited_.load() || !tex_) {
+        Log("[replay] not ready yet");
+        return false;
+    }
+    const int secs = seconds > 0 ? seconds : cfg_.replaySeconds;
+    EncoderConfig rc = MakeEncoderConfig(width_.load(), height_.load());
+    rc.hevc = true;
+    rc.rateMode = EncoderConfig::RateMode::CQ;
+    rc.cqp = cfg_.cqp;
+    std::vector<uint8_t> audioExtra =
+        (audioReady_ && mixer_.AnyActive()) ? mixer_.MixExtradata() : std::vector<uint8_t>{};
+    std::string e;
+    if (!replay_.Init(d3d_.device.Get(), rc, secs, prefix.empty() ? cfg_.replayPrefix : prefix,
+                      audioExtra, &e)) {
+        Log("[replay] failed: %s", e.c_str());
+        return false;
+    }
+    if (!replay_.RegisterTexture(tex_.Get(), &e)) {
+        Log("[replay] register failed: %s", e.c_str());
+        replay_.Disable();
+        return false;
+    }
+    Log("[replay] armed (%ds)", secs);
+    return true;
+}
+
+void Session::EndReplay() {
+    if (!replay_.Enabled()) return;
+    replay_.Stop();
+    Log("[replay] disarmed");
+}
+
 bool Session::SaveClip() {
-    if (!cfg_.replay) return false;
+    if (!replay_.Enabled()) return false;
     return replay_.Save() == 0;
 }
 
@@ -259,7 +538,7 @@ void Session::Supervisor() {
             }
         }
 
-        if (recon_.load() && cfg_.stream && !failed_.load()) {
+        if (recon_.load() && strOn_.load() && !failed_.load()) {
             if (!DoReconnect() && !stop_.load()) Fail("stream reconnect failed after all attempts");
         }
 
@@ -298,14 +577,7 @@ bool Session::DoReconnect() {
     return false;
 }
 
-bool Session::InitPipeline(uint32_t w, uint32_t h, std::string* err) {
-    width_ = w;
-    height_ = h;
-    if ((w & 1) || (h & 1)) {
-        *err = "capture size is not even";
-        return false;
-    }
-
+EncoderConfig Session::MakeEncoderConfig(uint32_t w, uint32_t h) const {
     EncoderConfig base;
     base.width = w;
     base.height = h;
@@ -314,6 +586,18 @@ bool Session::InitPipeline(uint32_t w, uint32_t h, std::string* err) {
     base.bframes = cfg_.bframes;
     base.lookahead = cfg_.lookahead;
     base.multipass = cfg_.multipass;
+    return base;
+}
+
+bool Session::InitPipeline(uint32_t w, uint32_t h, std::string* err) {
+    width_ = w;
+    height_ = h;
+    if ((w & 1) || (h & 1)) {
+        *err = "capture size is not even";
+        return false;
+    }
+
+    EncoderConfig base = MakeEncoderConfig(w, h);
 
     std::string e;
     if (cfg_.record) {
@@ -464,8 +748,7 @@ bool Session::InitPipeline(uint32_t w, uint32_t h, std::string* err) {
         }
     }
 
-    if (audioReady_ && mixer_.AnyActive() &&
-        (cfg_.record || cfg_.stream || cfg_.replay))
+    if (audioReady_ && mixer_.AnyActive())
         mixer_.AttachSink([this](int track, const uint8_t* d, size_t s, int64_t p) {
             return OnAudio(track, d, s, p);
         });
@@ -495,6 +778,9 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
         }
         return;
     }
+
+    // Outputs can be switched on/off at any time; do it between frames.
+    ApplyOutputCommands();
 
     // Pace to the configured frame rate: WGC can deliver at the display rate,
     // which would otherwise stretch the frame-counted media clock.
@@ -539,14 +825,15 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
             pushLayer(sceneSrv_.Get(), (float)s.x, (float)s.y, w, h);
             if (cfg_.chroma && cfg_.chromaLayer == 1) applyKey(layers[layerCount - 1]);
         } else if (s.type == SessionSourceType::Webcam) {
-            if (!webcamOn_) continue;
+            VideoLayer* v = FindVideo(s.device);
+            if (!v || !v->cam) continue;
             std::vector<uint8_t> camBuf;
             uint32_t cw = 0, ch = 0;
             uint64_t cno = 0;
-            if (webcam_.GetLatest(&camBuf, &cw, &ch, &cno)) {
-                if (!webcamTex_ || webcamW_ != cw || webcamH_ != ch) {
-                    webcamW_ = cw;
-                    webcamH_ = ch;
+            if (v->cam->GetLatest(&camBuf, &cw, &ch, &cno)) {
+                if (!v->tex || v->w != cw || v->h != ch) {
+                    v->w = cw;
+                    v->h = ch;
                     D3D11_TEXTURE2D_DESC wd = {};
                     wd.Width = cw;
                     wd.Height = ch;
@@ -557,40 +844,32 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
                     wd.Usage = D3D11_USAGE_DYNAMIC;
                     wd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
                     wd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-                    webcamTex_.Reset();
+                    v->tex.Reset();
                     if (SUCCEEDED(d3d_.device->CreateTexture2D(&wd, nullptr,
-                                                               webcamTex_.GetAddressOf()))) {
-                        webcamSrv_ = Compositor::CreateSrv(d3d_.device.Get(), webcamTex_.Get());
-                        const int targetW = cfg_.webcamWidth > 0 ? cfg_.webcamWidth : (int)canvasW / 4;
-                        camW_ = (float)targetW;
-                        camH_ = (float)targetW * (float)ch / (float)cw;
-                        const float margin = 16.f;
-                        const bool left =
-                            cfg_.webcamPos == "topleft" || cfg_.webcamPos == "bottomleft";
-                        const bool top =
-                            cfg_.webcamPos == "topleft" || cfg_.webcamPos == "topright";
-                        camX_ = left ? margin : canvasW - camW_ - margin;
-                        camY_ = top ? margin : canvasH - camH_ - margin;
-                    }
+                                                               v->tex.GetAddressOf())))
+                        v->srv = Compositor::CreateSrv(d3d_.device.Get(), v->tex.Get());
                 }
-                if (webcamTex_) {
+                if (v->tex) {
                     D3D11_MAPPED_SUBRESOURCE map{};
-                    if (SUCCEEDED(d3d_.context->Map(webcamTex_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
+                    if (SUCCEEDED(d3d_.context->Map(v->tex.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
                                                     &map))) {
                         const size_t rowBytes = (size_t)cw * 4;
                         for (uint32_t y = 0; y < ch; ++y)
                             memcpy((uint8_t*)map.pData + (size_t)y * map.RowPitch,
                                    camBuf.data() + (size_t)y * rowBytes, rowBytes);
-                        d3d_.context->Unmap(webcamTex_.Get(), 0);
+                        d3d_.context->Unmap(v->tex.Get(), 0);
                     }
                 }
             }
-            if (webcamSrv_ && camW_ > 0) {
+            if (v->srv && v->w > 0) {
                 float x, y, w, h;
+                const float defW =
+                    cfg_.webcamWidth > 0 ? (float)cfg_.webcamWidth : canvasW / 4.0f;
+                const float defH = defW * (float)v->h / (float)v->w;
                 if (s.xr >= 0.f && s.yr >= 0.f) {
                     // Free position (dragged on the UI preview), clamped on screen.
-                    w = camW_;
-                    h = camH_;
+                    w = defW;
+                    h = defH;
                     x = s.xr * canvasW;
                     y = s.yr * canvasH;
                     if (x + w > canvasW) x = canvasW - w;
@@ -604,14 +883,14 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
                     h = (float)s.h;
                 } else {
                     const float margin = 16.f;
-                    const bool left = webcamPos == "topleft" || webcamPos == "bottomleft";
-                    const bool top = webcamPos == "topleft" || webcamPos == "topright";
-                    w = camW_;
-                    h = camH_;
+                    const bool left = s.corner == 0 || s.corner == 2;
+                    const bool top = s.corner == 0 || s.corner == 1;
+                    w = defW;
+                    h = defH;
                     x = left ? margin : canvasW - w - margin;
                     y = top ? margin : canvasH - h - margin;
                 }
-                pushLayer(webcamSrv_.Get(), x, y, w, h);
+                pushLayer(v->srv.Get(), x, y, w, h);
                 if (cfg_.chroma && cfg_.chromaLayer == 0) applyKey(layers[layerCount - 1]);
             }
         } else if (s.type == SessionSourceType::Browser) {
@@ -708,7 +987,7 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
     }
 
     // ---- replay (its own continuous timeline) ----
-    if (cfg_.replay && replay_.Enabled()) replay_.PushVideo(tex_.Get(), replayFrames_.fetch_add(1));
+    if (replay_.Enabled()) replay_.PushVideo(tex_.Get(), replayFrames_.fetch_add(1));
     else replayFrames_.fetch_add(1);
 
     if (paused_.load()) {
@@ -718,13 +997,14 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
 
     bool anyOutput = false;
 
-    if (cfg_.record) {
+    if (recOn_.load()) {
         std::vector<uint8_t> data;
         bool key = false;
         int64_t outPts = -1;
         std::string e2;
         bool wantIdr = forceIdrRec_.exchange(false);
-        if (recEnc_.Encode(tex_.Get(), vidOut_.load(), wantIdr, &data, &key, &outPts, &e2)) {
+        const uint64_t idx = (uint64_t)((int64_t)vidOut_.load() - recBaseFrames_);
+        if (recEnc_.Encode(tex_.Get(), idx, wantIdr, &data, &key, &outPts, &e2)) {
             if (!data.empty()) {
                 std::string e3;
                 if (!recMux_.WriteVideo(data.data(), data.size(), key, outPts, &e3)) {
@@ -738,13 +1018,14 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
         }
     }
 
-    if (cfg_.stream && !recon_.load()) {
+    if (strOn_.load() && !recon_.load()) {
         std::vector<uint8_t> data;
         bool key = false;
         int64_t outPts = -1;
         std::string e2;
         bool wantIdr = forceIdrStr_.exchange(false);
-        if (strEnc_.Encode(tex_.Get(), vidOut_.load(), wantIdr, &data, &key, &outPts, &e2)) {
+        const uint64_t idx = (uint64_t)((int64_t)vidOut_.load() - strBaseFrames_);
+        if (strEnc_.Encode(tex_.Get(), idx, wantIdr, &data, &key, &outPts, &e2)) {
             if (!data.empty()) {
                 std::string e3;
                 if (!strMux_.WriteVideo(data.data(), data.size(), key, outPts, &e3)) {
@@ -763,14 +1044,15 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
 }
 
 bool Session::OnAudio(int track, const uint8_t* data, size_t size, int64_t pts) {
-    if (cfg_.replay && track == 0) replay_.PushAudio(data, size, pts);
-    if (cfg_.record && recMux_.IsOpen()) {
+    lastAudioPts_.store(pts);
+    if (replay_.Enabled() && track == 0) replay_.PushAudio(data, size, pts);
+    if (recOn_.load() && recMux_.IsOpen()) {
         std::string e;
-        recMux_.WriteAudio(track, data, size, pts, &e);
+        recMux_.WriteAudio(track, data, size, pts - recBaseAudio_, &e);
     }
-    if (cfg_.stream && !recon_.load() && strMux_.IsOpen()) {
+    if (strOn_.load() && !recon_.load() && strMux_.IsOpen()) {
         std::string e;
-        strMux_.WriteAudio(0, data, size, pts, &e);
+        strMux_.WriteAudio(0, data, size, pts - strBaseAudio_, &e);
     }
     return true;
 }
@@ -946,7 +1228,15 @@ Session::Stats Session::GetStats() const {    Stats st;
     st.dxgiShapes = dup_.shapeUpdates.load();
     st.desktopDevice = mixer_.DesktopName();
     st.micDevice = mixer_.MicName();
-    st.webcamName = webcamOn_ ? webcam_.ActiveDevice() : L"";
+    st.webcamName.clear();
+    for (auto& v : videos_) {
+        if (!v.cam) continue;
+        if (!st.webcamName.empty()) st.webcamName += L" + ";
+        st.webcamName += v.cam->ActiveDevice();
+    }
     st.browserActive = browserOn_ && browserW_ > 0;
+    st.recording = recOn_.load();
+    st.streaming = strOn_.load();
+    st.replayArmed = replay_.Enabled();
     return st;
 }

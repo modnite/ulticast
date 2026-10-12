@@ -13,6 +13,7 @@ test/*.flv
 test/*.png
 !test/ui_final_idle.png
 !test/ui_final_setup.png
+!test/ui_final_stream.png
 test/*.log
 test/Clip*.mkv
 test/Combo*.mkv

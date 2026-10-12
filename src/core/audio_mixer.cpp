@@ -119,11 +119,11 @@ void AudioMixer::Pump() {
         }
 
         if (DesktopActive())
-            Fill(desktop_, cfg_.desktopGain, d.data());
+            Fill(desktop_, cfg_.desktopGain * liveDeskGain_.load(), d.data());
         else
             std::fill(d.begin(), d.end(), 0.f);
         if (MicActive())
-            Fill(mic_, cfg_.micGain, m.data());
+            Fill(mic_, cfg_.micGain * liveMicGain_.load(), m.data());
         else
             std::fill(m.begin(), m.end(), 0.f);
 

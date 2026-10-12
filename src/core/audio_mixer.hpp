@@ -34,6 +34,11 @@ public:
     bool StartDevices(std::string* err);
     void AttachSink(const Sink& sink);
     void SetPausedFn(std::function<bool()> fn) { pausedFn_ = std::move(fn); }
+    // Runtime mute/unmute of the audio sources (scene Audio In/Out toggles).
+    void SetLiveSources(bool desktop, bool mic) {
+        liveDeskGain_.store(desktop ? 1.f : 0.f);
+        liveMicGain_.store(mic ? 1.f : 0.f);
+    }
     void Stop();
 
     bool DesktopActive() const { return desktop_ && desktop_->running.load(); }
@@ -56,6 +61,7 @@ private:
     std::function<bool()> pausedFn_;
     std::thread pump_;
     std::atomic<bool> quit_{false};
+    std::atomic<float> liveDeskGain_{1.f}, liveMicGain_{1.f};
     int sampleRate_ = 48000;
     bool loggedDesktopLost_ = false;
     bool loggedMicLost_ = false;

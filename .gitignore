@@ -1,0 +1,24 @@
+# Build output
+build/
+dist/
+
+# Vendored dependencies (fetched by tools/fetch-deps.ps1)
+third_party/
+
+# Test artifacts (scripts and test pages are tracked)
+test/smoke/
+test/*.mkv
+test/*.mp4
+test/*.flv
+test/*.png
+test/*.log
+test/Clip*.mkv
+test/Combo*.mkv
+test/Final*.mkv
+test/Replay*.mkv
+
+# Local junk
+*.zip
+*.7z
+.vs/
+*.user

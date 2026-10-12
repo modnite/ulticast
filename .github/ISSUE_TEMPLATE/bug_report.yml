@@ -1,0 +1,57 @@
+name: Bug report
+description: Something is broken or behaves badly in Ulticast
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time! Two minutes of diagnostics makes fixes much faster:
+
+        1. Open Ulticast and click **Report Bug** (or run `ulticast.exe --diagnostics`).
+        2. Attach the generated `diagnostics-*.txt` (it contains your system, devices and log tail —
+           the stream key is never included).
+        3. Optionally attach the newest log from `%LOCALAPPDATA%\Ulticast\logs`.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Describe the problem, including any error text from the activity strip.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start a recording with...
+        2. ...
+        3. The problem appears
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect instead?
+  - type: input
+    id: version
+    attributes:
+      label: Ulticast version
+      description: Shown by `ulticast.exe --version` or in the diagnostics report.
+      placeholder: "0.4.0"
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics report
+      description: Paste the contents of the diagnostics file (or attach it below).
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log tail (optional)
+      description: Last ~40 lines from `%LOCALAPPDATA%\Ulticast\logs` around the failure.
+      render: text

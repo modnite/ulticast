@@ -54,8 +54,8 @@ constexpr wchar_t kClassName[] = L"UlticastUiWindow";
 constexpr UINT WM_TRAY = WM_APP + 1;
 constexpr UINT_PTR kTimerId = 1;
 
-constexpr float kWinW = 1020.f;
-constexpr float kWinH = 660.f;
+constexpr float kWinW = 1060.f;
+constexpr float kWinH = 700.f;
 
 // palette (violet — as requested)
 const D2D1_COLOR_F kBg = D2D1::ColorF(0x120D1A);
@@ -270,6 +270,8 @@ private:
     void DrawTransport();
     void DrawActivityStrip();
     void DrawPopup();
+    void Card(float x, float y, float w, float h, const std::wstring& title);
+    D2D1_RECT_F PreviewRect() const { return S(320, 64, 720, 419); }
     // preview <-> canvas mapping for the draggable webcam PiP
     D2D1_RECT_F PreviewCanvasToDevice(const D2D1_RECT_F& pr, float cx, float cy, float cw,
                                       float ch) const;
@@ -1114,7 +1116,7 @@ void UiApp::DrawPreview(const D2D1_RECT_F& r) {
 void UiApp::DrawLivePage() {
     DrawSceneRail();
 
-    D2D1_RECT_F preview = S(320, 64, 680, 383);
+    D2D1_RECT_F preview = PreviewRect();
     DrawPreview(preview);
 
     DrawStatsCompact();
@@ -1160,8 +1162,8 @@ void UiApp::DrawSceneRail() {
     y += 22;
     Toggle(ID_SRC_CAPTURE, S(x, y, w, 38), L"Game Capture", &scenes_[activeScene_].capture);
     y += 42;
-    Toggle(ID_SRC_WEBCAM, S(x, y, 140, 38), L"Webcam", &scenes_[activeScene_].webcam);
-    Combo(ID_COMBO_CORNER, S(x + 148, y, 132, 38), positions_, &scenes_[activeScene_].corner,
+    Toggle(ID_SRC_WEBCAM, S(x, y, 150, 38), L"Webcam", &scenes_[activeScene_].webcam);
+    Combo(ID_COMBO_CORNER, S(x + 170, y, 110, 38), positions_, &scenes_[activeScene_].corner,
           scenes_[activeScene_].webcam);
     y += 42;
     Toggle(ID_SRC_BROWSER, S(x, y, w, 38), L"Browser Overlay", &scenes_[activeScene_].browser);
@@ -1170,16 +1172,16 @@ void UiApp::DrawSceneRail() {
 }
 
 void UiApp::DrawStatsCompact() {
-    D2D1_RECT_F r = S(320, 459, 680, 56);
+    D2D1_RECT_F r = S(320, 495, 720, 56);
     Panel(r, 12, WithAlpha(kPanel, 0.65f), false);
-    Text(FormatTime(stats_.elapsed), fmtMono_, S(340, 466, 150, 30), kText);
+    Text(FormatTime(stats_.elapsed), fmtMono_, S(340, 502, 150, 30), kText);
 
     double fps = stats_.elapsed > 0.1 ? stats_.captured / stats_.elapsed : 0.0;
     std::wstring line = Format(L"%.0f fps   ·   %.1f Mbps   ·   %s", fps, stats_.kbps / 1000.0,
                                Widen(stats_.backend).c_str());
     if (stats_.width) line += Format(L"   ·   %ux%u", stats_.width, stats_.height);
     line += Format(L"   ·   %llu dropped", (unsigned long long)stats_.dropped);
-    Text(line, fmtSmall_, S(500, 466, 480, 30), kTextDim, DWRITE_TEXT_ALIGNMENT_TRAILING);
+    Text(line, fmtSmall_, S(500, 502, 520, 30), kTextDim, DWRITE_TEXT_ALIGNMENT_TRAILING);
 
     std::wstring audio;
     if (previewSession_)
@@ -1192,143 +1194,152 @@ void UiApp::DrawStatsCompact() {
             audio += L" + " + stats_.micDevice;
         if (!stats_.webcamName.empty()) audio += L"   ·   cam " + stats_.webcamName;
     }
-    dc_->PushAxisAlignedClip(S(340, 498, 640, 15), D2D1_ANTIALIAS_MODE_ALIASED);
-    Text(audio, fmtSmall_, S(340, 497, 640, 15), WithAlpha(kTextDim, 0.75f));
+    dc_->PushAxisAlignedClip(S(340, 534, 680, 15), D2D1_ANTIALIAS_MODE_ALIASED);
+    Text(audio, fmtSmall_, S(340, 533, 680, 15), WithAlpha(kTextDim, 0.75f));
     dc_->PopAxisAlignedClip();
 }
 
 void UiApp::DrawSetupPage() {
-    const float rowH = 36, gap = 6, sectionGap = 12;
+    const float rowH = 34, rowGap = 6, cardGap = 12, pad = 10, headH = 18;
 
     // ---- left column: capture, devices, encoding
     {
-        const float x = 20, w = 480;
-        float y = 64;
+        const float x = 20, w = 490, cw = w - 20;  // card content width
+        float cy = 64;
 
-        SectionLabel(L"SOURCE", x, y);
-        y += 22;
-        Combo(ID_COMBO_MONITOR, S(x, y, 300, rowH), monitors_, &selMonitor_, selWindow_ == 0);
-        Combo(ID_COMBO_FPS, S(x + 308, y, w - 308, rowH), fpss_, &selFps_);
-        y += rowH + gap;
-        Combo(ID_COMBO_WINDOW, S(x, y, 300, rowH), windows_, &selWindow_);
-        Combo(ID_COMBO_BACKEND, S(x + 308, y, w - 308, rowH), backends_, &selBackend_);
-        y += rowH + gap;
-        Combo(ID_COMBO_GPU, S(x, y, w, rowH), gpus_, &selGpu_);
-        y += rowH + sectionGap;
+        Card(x, cy, w, pad + headH + 3 * rowH + 2 * rowGap + pad, L"SOURCE");
+        float y = cy + pad + headH + 4;
+        Combo(ID_COMBO_MONITOR, S(x + pad, y, 300, rowH), monitors_, &selMonitor_, selWindow_ == 0);
+        Combo(ID_COMBO_FPS, S(x + pad + 318, y, cw - 318, rowH), fpss_, &selFps_);
+        y += rowH + rowGap;
+        Combo(ID_COMBO_WINDOW, S(x + pad, y, 300, rowH), windows_, &selWindow_);
+        Combo(ID_COMBO_BACKEND, S(x + pad + 318, y, cw - 318, rowH), backends_, &selBackend_);
+        y += rowH + rowGap;
+        Combo(ID_COMBO_GPU, S(x + pad, y, cw, rowH), gpus_, &selGpu_);
+        cy += pad + headH + 3 * rowH + 2 * rowGap + pad + cardGap;
 
-        SectionLabel(L"CAMERA & AUDIO", x, y);
-        y += 22;
-        Combo(ID_COMBO_WEBCAMDEV, S(x, y, w, rowH), webcams_, &selWebcam_);
-        y += rowH + gap;
-        Toggle(ID_TOGGLE_DESKTOP, S(x, y, 130, rowH), L"Desktop", &settings_.desktopAudio);
-        Combo(ID_COMBO_DESKDEV, S(x + 138, y, w - 138, rowH), desktops_, &selDesk_,
+        Card(x, cy, w, pad + headH + 5 * rowH + 4 * rowGap + pad, L"CAMERA & AUDIO");
+        y = cy + pad + headH + 4;
+        Combo(ID_COMBO_WEBCAMDEV, S(x + pad, y, cw, rowH), webcams_, &selWebcam_);
+        y += rowH + rowGap;
+        Toggle(ID_TOGGLE_DESKTOP, S(x + pad, y, 130, rowH), L"Desktop", &settings_.desktopAudio);
+        Combo(ID_COMBO_DESKDEV, S(x + pad + 146, y, cw - 146, rowH), desktops_, &selDesk_,
               settings_.desktopAudio);
-        y += rowH + gap;
-        Toggle(ID_TOGGLE_MIC, S(x, y, 100, rowH), L"Mic", &settings_.mic);
-        Combo(ID_COMBO_MICDEV, S(x + 108, y, w - 108, rowH), mics_, &selMic_, settings_.mic);
-        y += rowH + gap;
-        Slider(ID_SLIDER_MICGAIN, S(x, y, 236, rowH), 0, 200, &micGainPct_, L"Mic %d%%");
-        Slider(ID_SLIDER_DESKGAIN, S(x + 244, y, 236, rowH), 0, 200, &deskGainPct_, L"Desk %d%%");
-        y += rowH + gap;
-        Toggle(ID_TOGGLE_CHROMA, S(x, y, 130, rowH), L"Chroma Key", &settings_.chroma);
-        Field(ID_FIELD_CHROMA, S(x + 138, y, 160, rowH), &chromaText_, false, L"00FF00");
-        y += rowH + sectionGap;
+        y += rowH + rowGap;
+        Toggle(ID_TOGGLE_MIC, S(x + pad, y, 110, rowH), L"Mic", &settings_.mic);
+        Combo(ID_COMBO_MICDEV, S(x + pad + 126, y, cw - 126, rowH), mics_, &selMic_, settings_.mic);
+        y += rowH + rowGap;
+        Slider(ID_SLIDER_MICGAIN, S(x + pad, y, 226, rowH), 0, 200, &micGainPct_, L"Mic %d%%");
+        Slider(ID_SLIDER_DESKGAIN, S(x + pad + 244, y, 226, rowH), 0, 200, &deskGainPct_,
+               L"Desk %d%%");
+        y += rowH + rowGap;
+        Toggle(ID_TOGGLE_CHROMA, S(x + pad, y, 130, rowH), L"Chroma Key", &settings_.chroma);
+        Field(ID_FIELD_CHROMA, S(x + pad + 146, y, 160, rowH), &chromaText_, false, L"00FF00");
+        cy += pad + headH + 5 * rowH + 4 * rowGap + pad + cardGap;
 
-        SectionLabel(L"VIDEO", x, y);
-        y += 22;
-        Combo(ID_COMBO_RATE, S(x, y, 236, rowH), rates_, &selRate_);
-        Combo(ID_COMBO_PRESET, S(x + 244, y, w - 244, rowH), presets_, &selPreset_);
-        y += rowH + gap;
+        Card(x, cy, w, pad + headH + 4 * rowH + 3 * rowGap + pad, L"VIDEO");
+        y = cy + pad + headH + 4;
+        Combo(ID_COMBO_RATE, S(x + pad, y, 226, rowH), rates_, &selRate_);
+        Combo(ID_COMBO_PRESET, S(x + pad + 244, y, 226, rowH), presets_, &selPreset_);
+        y += rowH + rowGap;
         if (selRate_ == 0) {
-            Slider(ID_SLIDER_CQP, S(x, y, 236, rowH), 1, 51, (int*)&settings_.cqp, L"CQ %d");
+            Slider(ID_SLIDER_CQP, S(x + pad, y, 226, rowH), 1, 51, (int*)&settings_.cqp, L"CQ %d");
         } else {
-            Field(ID_FIELD_BITRATE, S(x, y, 236, rowH), &bitrateText_, false,
-                  L"Record bitrate (kbps)");
+            Field(ID_FIELD_BITRATE, S(x + pad, y, 226, rowH), &bitrateText_, false,
+                  L"Bitrate (kbps)");
         }
-        Slider(ID_SLIDER_BFRAMES, S(x + 244, y, 236, rowH), 0, 4, &settings_.bframes, L"B-frames %d");
-        y += rowH + gap;
-        Toggle(ID_TOGGLE_LOOKAHEAD, S(x, y, 236, rowH), L"Lookahead", &settings_.lookahead);
-        Toggle(ID_TOGGLE_MULTIPASS, S(x + 244, y, 236, rowH), L"Two-pass", &settings_.multipass);
-        y += rowH + gap;
-        Text(L"Codec:", fmtSmall_, S(x, y, 48, rowH), kTextDim);
-        Combo(ID_COMBO_CODEC, S(x + 52, y, 184, rowH), codecs_, &selCodec_);
+        Slider(ID_SLIDER_BFRAMES, S(x + pad + 244, y, 226, rowH), 0, 4, &settings_.bframes,
+               L"B-frames %d");
+        y += rowH + rowGap;
+        Toggle(ID_TOGGLE_LOOKAHEAD, S(x + pad, y, 221, rowH), L"Lookahead", &settings_.lookahead);
+        Toggle(ID_TOGGLE_MULTIPASS, S(x + pad + 249, y, 221, rowH), L"Two-pass",
+               &settings_.multipass);
+        y += rowH + rowGap;
+        Text(L"Codec", fmtBody_, S(x + pad, y, 60, rowH), kTextDim);
+        Combo(ID_COMBO_CODEC, S(x + pad + 66, y, 200, rowH), codecs_, &selCodec_);
     }
 
     // ---- right column: output, clips, stream, overlay, misc
     {
-        const float x = 520, w = 480;
-        float y = 64;
+        const float x = 550, w = 490, cw = w - 20;
+        float cy = 64;
 
-        SectionLabel(L"OUTPUT", x, y);
-        y += 22;
-        Toggle(ID_TOGGLE_RECORD, S(x, y, 110, rowH), L"Record", &settings_.record);
-        D2D1_RECT_F pathR = S(x + 118, y, 248, rowH);
+        Card(x, cy, w, pad + headH + rowH + pad, L"OUTPUT");
+        float y = cy + pad + headH + 4;
+        Toggle(ID_TOGGLE_RECORD, S(x + pad, y, 120, rowH), L"Record", &settings_.record);
+        D2D1_RECT_F pathR = S(x + pad + 136, y, 232, rowH);
         Panel(pathR, 8, kPanel, true);
         dc_->PushAxisAlignedClip(pathR, D2D1_ANTIALIAS_MODE_ALIASED);
         Text(ShortPath(settings_.recordPath), fmtSmall_, Inset(pathR, 12, 0),
              settings_.record ? kText : kTextDim);
         dc_->PopAxisAlignedClip();
-        Button(ID_BROWSE, S(x + 374, y, 106, rowH), L"Browse", BtnStyle::Ghost, settings_.record);
-        y += rowH + sectionGap;
+        Button(ID_BROWSE, S(x + pad + 384, y, 86, rowH), L"Browse", BtnStyle::Ghost,
+               settings_.record);
+        cy += pad + headH + rowH + pad + cardGap;
 
-        SectionLabel(L"CLIPS", x, y);
-        y += 22;
-        Toggle(ID_TOGGLE_REPLAY, S(x, y, 110, rowH), L"Replay", &settings_.replay);
-        Slider(ID_SLIDER_REPLAY, S(x + 118, y, 236, rowH), 10, 120, &settings_.replaySeconds,
+        Card(x, cy, w, pad + headH + rowH + pad, L"CLIPS");
+        y = cy + pad + headH + 4;
+        Toggle(ID_TOGGLE_REPLAY, S(x + pad, y, 120, rowH), L"Replay", &settings_.replay);
+        Slider(ID_SLIDER_REPLAY, S(x + pad + 136, y, 200, rowH), 10, 120, &settings_.replaySeconds,
                L"%ds");
-        Text(L"F9 = save clip", fmtSmall_, S(x + 362, y, w - 362, rowH),
+        Text(L"F9 = save clip", fmtSmall_, S(x + pad + 346, y, 124, rowH),
              WithAlpha(kTextDim, 0.8f));
-        y += rowH + sectionGap;
+        cy += pad + headH + rowH + pad + cardGap;
 
-        SectionLabel(L"STREAM", x, y);
-        y += 22;
-        Combo(ID_COMBO_PLATFORM, S(x, y, 236, rowH), platforms_, &selPlatform_);
-        Toggle(ID_TOGGLE_STREAM, S(x + 244, y, w - 244, rowH), L"Go Live", &settings_.stream);
-        y += rowH + gap;
-        Field(ID_FIELD_STREAMBITRATE, S(x, y, 150, rowH), &streamBitrateText_, false,
+        Card(x, cy, w, pad + headH + 3 * rowH + 2 * rowGap + pad, L"STREAM");
+        y = cy + pad + headH + 4;
+        Combo(ID_COMBO_PLATFORM, S(x + pad, y, 226, rowH), platforms_, &selPlatform_);
+        Toggle(ID_TOGGLE_STREAM, S(x + pad + 244, y, 226, rowH), L"Go Live", &settings_.stream);
+        y += rowH + rowGap;
+        Field(ID_FIELD_STREAMBITRATE, S(x + pad, y, 150, rowH), &streamBitrateText_, false,
               L"kbps (CBR)");
         if (platformKeys_[selPlatform_] == "custom")
-            Field(ID_FIELD_URL, S(x + 158, y, w - 158, rowH), &urlText_, false, L"rtmp:// ingest URL");
+            Field(ID_FIELD_URL, S(x + pad + 166, y, 304, rowH), &urlText_, false,
+                  L"rtmp:// ingest URL");
         else
-            Field(ID_FIELD_KEY, S(x + 158, y, w - 158, rowH), &keyText_, true,
+            Field(ID_FIELD_KEY, S(x + pad + 166, y, 304, rowH), &keyText_, true,
                   L"Stream key (paste)");
-        y += rowH + sectionGap;
+        y += rowH + rowGap;
+        Text(L"Streaming uses CBR — pick a bitrate your upload can hold", fmtSmall_,
+             S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+        cy += pad + headH + 3 * rowH + 2 * rowGap + pad + cardGap;
 
-        SectionLabel(L"BROWSER OVERLAY", x, y);
-        y += 22;
-        Field(ID_FIELD_BROWSER, S(x, y, w, rowH), &browserText_, false,
+        Card(x, cy, w, pad + headH + rowH + pad, L"BROWSER OVERLAY");
+        y = cy + pad + headH + 4;
+        Field(ID_FIELD_BROWSER, S(x + pad, y, cw, rowH), &browserText_, false,
               L"HTML file or https:// URL (add the source in a scene)");
-        y += rowH + sectionGap + 6;
+        cy += pad + headH + rowH + pad + cardGap;
 
-        SectionLabel(L"TROUBLESHOOTING", x, y);
-        y += 22;
-        Button(ID_OPENLOGS, S(x, y, 150, rowH), L"Open Logs", BtnStyle::Ghost);
-        Button(ID_REPORT, S(x + 158, y, 150, rowH), L"Report Bug", BtnStyle::Ghost);
-        Button(ID_OPENFOLDER, S(x + 316, y, w - 316, rowH), L"Open Folder", BtnStyle::Ghost,
+        Card(x, cy, w, pad + headH + 2 * rowH + rowGap + pad, L"TROUBLESHOOTING");
+        y = cy + pad + headH + 4;
+        Button(ID_OPENLOGS, S(x + pad, y, 150, rowH), L"Open Logs", BtnStyle::Ghost);
+        Button(ID_REPORT, S(x + pad + 158, y, 150, rowH), L"Report Bug", BtnStyle::Ghost);
+        Button(ID_OPENFOLDER, S(x + pad + 316, y, 154, rowH), L"Open Folder", BtnStyle::Ghost,
                settings_.record);
-        y += rowH + gap;
-        Toggle(ID_TOGGLE_IDLEPREVIEW, S(x, y, 236, rowH), L"Idle preview", &settings_.idlePreview);
-        Toggle(ID_TOGGLE_TRAYCLOSE, S(x + 244, y, 236, rowH), L"Close to tray",
+        y += rowH + rowGap;
+        Toggle(ID_TOGGLE_IDLEPREVIEW, S(x + pad, y, 221, rowH), L"Idle preview",
+               &settings_.idlePreview);
+        Toggle(ID_TOGGLE_TRAYCLOSE, S(x + pad + 249, y, 221, rowH), L"Close to tray",
                &settings_.closeToTray);
     }
 }
 
 void UiApp::DrawTransport() {
     const bool recording = sessionRunning_ && !previewSession_;
-    Button(ID_START, S(20, 584, 140, 44), recording ? L"Stop" : L"Start",
+    Button(ID_START, S(20, 624, 140, 44), recording ? L"Stop" : L"Start",
            recording ? BtnStyle::Danger : BtnStyle::Primary);
-    Button(ID_PAUSE, S(168, 584, 100, 44), stats_.paused ? L"Resume" : L"Pause", BtnStyle::Ghost,
+    Button(ID_PAUSE, S(168, 624, 100, 44), stats_.paused ? L"Resume" : L"Pause", BtnStyle::Ghost,
            recording);
-    Button(ID_CLIP, S(276, 584, 112, 44), L"Snap Clip", BtnStyle::Ghost,
+    Button(ID_CLIP, S(276, 624, 112, 44), L"Snap Clip", BtnStyle::Ghost,
            recording && settings_.replay);
-    Button(ID_OPENLOGS, S(400, 584, 86, 44), L"Logs", BtnStyle::Ghost);
-    Button(ID_REPORT, S(494, 584, 116, 44), L"Report Bug", BtnStyle::Ghost);
-    Button(ID_OPENFOLDER, S(868, 584, 132, 44), L"Open Folder", BtnStyle::Ghost,
+    Button(ID_OPENLOGS, S(400, 624, 86, 44), L"Logs", BtnStyle::Ghost);
+    Button(ID_REPORT, S(494, 624, 116, 44), L"Report Bug", BtnStyle::Ghost);
+    Button(ID_OPENFOLDER, S(908, 624, 132, 44), L"Open Folder", BtnStyle::Ghost,
            settings_.record);
 }
 
 void UiApp::DrawActivityStrip() {
-    D2D1_RECT_F r = S(320, 523, 680, 28);
+    D2D1_RECT_F r = S(320, 559, 720, 28);
     std::vector<std::wstring> lines;
     {
         std::lock_guard<std::mutex> lock(logMu_);
@@ -1402,6 +1413,11 @@ void UiApp::DrawPopup() {
         std::wstring s = Format(L"%d / %d  (scroll)", popupScroll_ + shown, total);
         Text(s, fmtSmall_, hint, WithAlpha(kTextDim, 0.8f), DWRITE_TEXT_ALIGNMENT_TRAILING);
     }
+}
+
+void UiApp::Card(float x, float y, float w, float h, const std::wstring& title) {
+    Panel(S(x, y, w, h), 12, WithAlpha(kPanel, 0.5f), true);
+    Text(title, fmtSection_, S(x + 14, y + 9, w - 28, 16), WithAlpha(kTextDim, 0.95f));
 }
 
 // ----------------------------------------------------------------- preview
@@ -2206,7 +2222,7 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
             }
             if (draggingWebcam_ && !scenes_.empty() && stats_.width && previewW_ && previewH_) {
-                D2D1_RECT_F pr = S(320, 64, 680, 383);
+                D2D1_RECT_F pr = PreviewRect();
                 const float sc = (std::min)((pr.right - pr.left) / (float)previewW_,
                                             (pr.bottom - pr.top) / (float)previewH_);
                 const float ox = (pr.left + pr.right) / 2 - previewW_ * sc / 2;
@@ -2242,7 +2258,7 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             if (press_ == ID_PREVIEW_WEBCAM) {
                 draggingWebcam_ = true;
-                D2D1_RECT_F wr = PreviewWebcamRect(S(320, 64, 680, 383));
+                D2D1_RECT_F wr = PreviewWebcamRect(PreviewRect());
                 dragOffX_ = x - wr.left;
                 dragOffY_ = y - wr.top;
             }

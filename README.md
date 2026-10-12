@@ -35,7 +35,7 @@ Please attach `diagnostics-*.txt` and the newest log to
 
 ![Ulticast UI — idle preview](test/ui_final_idle.png)
 
-![Ulticast UI — recording](test/ui_final_recording.png)
+![Ulticast UI — setup](test/ui_final_setup.png)
 
 ## Architecture
 
@@ -67,6 +67,8 @@ Please attach `diagnostics-*.txt` and the newest log to
 - **Stage 7** usability pass: DPI-proof window (resizable/maximizable), idle preview, GPU picker +
   NVIDIA auto-select, CBR + full CQ range, encoder options, audio device/gain controls, live webcam
   drag, close-to-tray, start-menu shortcut option — done, verified
+- **Stage 8** installer/UX hardening: installer force-closes any running instance (incl. tray-hidden
+  UI and CEF helpers), single-instance app guard, carded Setup layout with proper control spacing — done, verified
 - Next: on-hardware validation on the RTX 3080 rig
 
 ## The UI (Ulticast-ui.exe)

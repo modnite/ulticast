@@ -25,6 +25,12 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.19041
+; The [Code] section below closes any running Ulticast itself (including the
+; tray-hidden UI and its CEF helper processes). Restart Manager cannot do that
+; reliably, so it is switched off to avoid the "close these applications"
+; prompt that leaves a stuck process behind.
+CloseApplications=no
+RestartApplications=no
 
 [Tasks]
 Name: "startmenuicon"; Description: "Create a Start Menu shortcut"; GroupDescription: "Additional shortcuts:"; Flags: checkedonce
@@ -44,3 +50,40 @@ Filename: "{app}\ulticast-ui.exe"; Description: "Launch Ulticast"; Flags: nowait
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
+
+[Code]
+// Stop every Ulticast process before install/uninstall. taskkill /T takes the
+// CEF helper processes with it; without /F it asks the window to close first,
+// then the loop force-kills whatever is left (tray-hidden UI, hung CEF).
+procedure KillUlticast();
+var
+  Rc, I: Integer;
+begin
+  Exec('taskkill.exe', '/IM ulticast-ui.exe /T', '', SW_HIDE, ewWaitUntilTerminated, Rc);
+  Exec('taskkill.exe', '/IM ulticast.exe /T', '', SW_HIDE, ewWaitUntilTerminated, Rc);
+  Sleep(1500);
+  for I := 1 to 10 do
+  begin
+    Exec('taskkill.exe', '/IM ulticast-ui.exe /T /F', '', SW_HIDE, ewWaitUntilTerminated, Rc);
+    if Rc <> 0 then Break;  // 128 = no such process: all gone
+    Sleep(500);
+  end;
+  for I := 1 to 10 do
+  begin
+    Exec('taskkill.exe', '/IM ulticast.exe /T /F', '', SW_HIDE, ewWaitUntilTerminated, Rc);
+    if Rc <> 0 then Break;
+    Sleep(500);
+  end;
+  Sleep(500);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  KillUlticast();
+  Result := '';
+end;
+
+procedure InitializeUninstall();
+begin
+  KillUlticast();
+end;

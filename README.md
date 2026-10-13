@@ -80,10 +80,9 @@ Please attach `diagnostics-*.txt` and the newest log to
   sources per scene (second monitor/window as a PiP layer), DirectShow camera fallback, audio device
   auto-recovery, themes (8 accents + light/dark), dead-space-free layout, cleaner action buttons with
   record/play/stop glyphs — built and tested locally (12/12 smoke tests)
-- **Stage 12** (unreleased): Twitch OAuth device-code login (connect once, stream key stays current),
-  DirectShow camera fallback, mic monitoring, audio device auto-recovery — built and tested locally
-  (12/12 smoke tests; Twitch flow verified against the live API)
-- Next: lock in, then release; on-hardware validation on the RTX 3080 rig
+- **Stage 12** Twitch OAuth device-code login (connect once, stream key stays current),
+  DirectShow camera fallback, mic monitoring, audio device auto-recovery — released in v0.9.0
+- Next: on-hardware validation on the RTX 3080 rig
 
 ## The UI (Ulticast-ui.exe)
 

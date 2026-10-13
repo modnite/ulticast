@@ -18,6 +18,9 @@ struct AudioConfig {
     float micGain = 1.0f;
     bool gate = false;      // mic noise gate
     float gateDb = -45.f;   // gate threshold (dBFS)
+    bool comp = false;      // mic compressor
+    float compDb = -18.f;   // compressor threshold (dBFS)
+    float compRatio = 3.0f; // compression ratio
     int bitrateKbps = 160;
     int tracks = 1;  // 1 = mix only, 2 = mix + mic-only track (file output)
 };
@@ -45,6 +48,12 @@ public:
     void SetGate(bool on, float db) {
         gateOn_.store(on);
         gateDb_.store(db);
+    }
+    // Runtime mic compressor (threshold dBFS, ratio >= 1).
+    void SetCompressor(bool on, float db, float ratio) {
+        compOn_.store(on);
+        compDb_.store(db);
+        compRatio_.store(ratio < 1.f ? 1.f : ratio);
     }
     void Stop();
 
@@ -74,6 +83,10 @@ private:
     float gateEnv_ = 1.f;   // current gate gain (smoothed)
     int gateHold_ = 0;      // samples left in the hold window
     int gateHoldSamples_ = 5760;  // ~120 ms at 48 kHz
+    std::atomic<bool> compOn_{false};
+    std::atomic<float> compDb_{-18.f};
+    std::atomic<float> compRatio_{3.f};
+    float compEnv_ = 0.f;   // compressor envelope follower
     int sampleRate_ = 48000;
     bool loggedDesktopLost_ = false;
     bool loggedMicLost_ = false;

@@ -76,8 +76,10 @@ Please attach `diagnostics-*.txt` and the newest log to
   game / video devices incl. capture cards / mic / desktop audio / browser), per-scene sources with
   live add/configure/remove — done, verified
 - **Stage 10** roadmap: mic noise gate (live threshold, CLI `--gate`) — done, verified
-- Next: on-hardware validation on the RTX 3080 rig; compressor + per-source monitoring; DirectShow
-  camera fallback; multiple capture sources per scene
+- **Stage 11** (unreleased): mic compressor (-1 dB safety clip), multiple capture sources per scene
+  (second monitor/window as a PiP layer), themes (8 accents + light/dark), dead-space-free layout,
+  cleaner action buttons with record/play/stop glyphs — built and tested locally
+- Next: lock in, then release; on-hardware validation on the RTX 3080 rig
 
 ## The UI (Ulticast-ui.exe)
 
@@ -89,15 +91,15 @@ together (the same separation ShadowPlay/OBS users expect).
 |---|---|
 | **Record** | scenes + sources rail · live preview (stats overlaid) · **RECORDING** (path, container codec), **CLIPS** (replay toggle, buffer length, F9), **ENCODING** (CQ or CBR, preset, B-frames) · transport: **Start/Stop Recording**, Pause, Snap Clip, Open Folder |
 | **Stream** | scenes + sources rail · live preview · **PLATFORM** (Twitch / YouTube / Facebook / custom, stream key or RTMP URL, reconnect attempts) · **STREAM QUALITY** (bitrate, H.264/HEVC, preset) · transport: **Go Live / End Stream**, Pause, Snap Clip |
-| **Settings** | capture defaults (monitor, window, backend, fps, **GPU**), camera & audio defaults (devices, mic/desktop gain, **mic noise gate**, chroma key), browser overlay URL, advanced encoder (lookahead, two-pass), behavior (idle preview, close to tray), troubleshooting, about |
+| **Settings** | capture defaults (monitor, window, backend, fps, **GPU**), camera & audio defaults (devices, mic/desktop gain, chroma key), **audio filters** (noise gate, compressor with -1 dB safety clip), **appearance** (8 accents + light/dark), browser overlay URL, advanced encoder (lookahead, two-pass), behavior (idle preview, close to tray), troubleshooting, about |
 
 **Sources** (per scene, OBS-style — add with **+ Add**, click a row to configure it):
 
 | Type | Tag | Options |
 |---|---|---|
-| Display Capture | DISP | monitor |
-| Window Capture | WIN | window picker (scrollable list) |
-| Game Capture | GAME | monitor + DXGI duplication (fullscreen games) |
+| Display Capture | DISP | monitor — **add more than one to layer a second monitor as a PiP** |
+| Window Capture | WIN | window picker (scrollable list) — also works as a PiP layer |
+| Game Capture | GAME | monitor + DXGI duplication (fullscreen games, first capture) |
 | Video Capture Device | VID | **any camera or capture card** — multiple devices can run at once, each with its own PiP corner or free position (drag it on the preview) |
 | Microphone | MIC | capture device |
 | Desktop Audio | SYS | output device (loopback) |
@@ -106,8 +108,13 @@ together (the same separation ShadowPlay/OBS users expect).
 - **Independent outputs**: Start Recording and Go Live are separate actions; either can start the
   session and the other can be switched on later without interrupting the first (recording and
   streaming use separate NVENC sessions).
-- **Mic noise gate**: threshold-based gate (2 ms attack / 120 ms hold / 150 ms release) that removes
-  keyboard and fan noise from the mix; adjustable live while recording (`--gate DB` on the CLI).
+- **Audio filters**: noise gate (2 ms attack / 120 ms hold / 150 ms release) and a compressor with a
+  -1 dB safety clip; both adjustable live while recording (`--gate DB`, `--comp DB`,
+  `--comp-ratio R` on the CLI).
+- **Themes**: eight accent colours (violet, cyan, emerald, amber, rose, azure, magenta, slate) with
+  light and dark variants; everything (buttons, switches, sliders, caption bar) follows the accent.
+- **Layout**: no dead space — the rail's leftover room holds the activity log, mode cards fill their
+  rows, and the Settings columns are balanced top to bottom.
 - **Scenes**: each scene owns its source list; switching applies live while recording.
 - **Idle preview**: while not producing output, Ulticast composites the scene into the preview only —
   the camera opens only when recording, streaming or the replay buffer is armed.
@@ -200,13 +207,16 @@ Ulticast --platform twitch --key <key> --also-record backup.mkv
 
 - **Twitch login (OAuth)** instead of pasting a stream key — requires an app registration and the
   device-code flow.
-- **Audio filters, part 2**: compressor/limiter, per-source monitoring (hear the mic in headphones).
+- **Audio filters, part 3**: per-source monitoring (hear the mic in your headphones).
 - **DirectShow camera fallback** for virtual cameras that Media Foundation does not enumerate.
-- Multiple simultaneous *capture* sources per scene (a second monitor or window as its own layer;
-  multiple video devices already work).
 - Audio device auto-recovery when a device is unplugged mid-session (currently logs and keeps the
   session running with the remaining devices).
 
 ### Done
 
 - **Audio filters, part 1**: mic noise gate with live threshold (`--gate DB`).
+- **Audio filters, part 2**: mic compressor with live threshold/ratio and a -1 dB safety clip
+  (`--comp DB`, `--comp-ratio R`).
+- **Multiple capture sources per scene**: extra display/window captures composite as PiP layers
+  (position configurable per source).
+- **Themes**: 8 accent colours, light/dark, caption bar follows the accent.

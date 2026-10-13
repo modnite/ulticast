@@ -119,6 +119,17 @@ $nv = MeanVolume "$t\nogate.mkv"
 Check 'noise gate: gated mix is never louder than ungated' ($gv -le ($nv + 0.5)) `
       ("gate=" + $gv + " dB ungated=" + $nv + " dB delta=" + [math]::Round($nv - $gv, 1) + " dB")
 
+# Compressor: with a low threshold the -1 dB safety clip must cap the peaks.
+& $exe --backend wgc --monitor 0 --seconds 4 --out "$t\comp.mkv" --mic --comp -35 2>&1 | Out-Null
+function PeakVolume([string]$file) {
+    $txt = ffmpeg -i $file -af volumedetect -f null - 2>&1 | Out-String
+    if ($txt -match 'max_volume:\s*(-?[0-9.]+)') { return [double]$Matches[1] }
+    return -99.0
+}
+$pv = PeakVolume "$t\comp.mkv"
+Check 'compressor: peaks are limited (safety clip at -1 dB)' ($pv -le -0.9) `
+      ("max=" + $pv + " dB")
+
 # --------------------------------------------------------------- 8. cursor
 # Park the cursor, then capture the same desktop twice *concurrently* (one run
 # with cursor compositing, one without). Because both captures happen at the

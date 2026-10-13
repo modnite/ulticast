@@ -186,6 +186,7 @@ bool Session::Start(const SessionConfig& cfg, std::string* err) {
     }
 
     StartVideoSources();
+    StartExtraCaptures();
 
     t0_ = std::chrono::steady_clock::now();
     lastElapsed_ = 0.0;
@@ -211,6 +212,7 @@ void Session::Stop() {
     if (supervisor_.joinable()) supervisor_.join();
 
     cap_.Stop();
+    StopExtraCaptures();
     mixer_.Stop();
     dup_.Stop();
     for (auto& v : videos_) {
@@ -330,6 +332,46 @@ Session::VideoLayer* Session::FindVideo(const std::string& device) {
             if (v.cam) return &v;
     }
     return nullptr;
+}
+
+void Session::StartExtraCaptures() {
+    int captureIdx = 0;
+    for (const auto& s : cfg_.sources) {
+        if (s.type != SessionSourceType::Capture || !s.enabled) continue;
+        ++captureIdx;
+        if (captureIdx == 1) continue;  // the first capture drives the frame tick
+
+        auto e = std::make_unique<ExtraCapture>();
+        e->monitor = s.monitor;
+        e->window = s.window;
+        ExtraCapture* ep = e.get();
+        e->cap = std::make_unique<WgcCapture>();
+        FrameCallback cb = [ep](ID3D11Texture2D* t, uint32_t, uint32_t, uint64_t) {
+            std::lock_guard<std::mutex> lk(ep->mu);
+            ep->pending = t;  // AddRef via ComPtr: the frame outlives the callback
+        };
+        std::string err;
+        const bool ok = !e->window.empty()
+                            ? e->cap->StartWindow(e->window, d3d_.device.Get(), cb, &err)
+                            : e->cap->StartMonitor(e->monitor, d3d_.device.Get(), cb, &err);
+        if (!ok) {
+            Log("[capture] extra layer failed: %s", err.c_str());
+            continue;
+        }
+        Log("[capture] extra layer: %s", e->window.empty() ? "monitor" : "window");
+        extraCaps_.push_back(std::move(e));
+    }
+}
+
+void Session::StopExtraCaptures() {
+    for (auto& e : extraCaps_) {
+        if (e->cap) e->cap->Stop();
+        std::lock_guard<std::mutex> lk(e->mu);
+        e->pending.Reset();
+        e->tex.Reset();
+        e->srv.Reset();
+    }
+    extraCaps_.clear();
 }
 
 void Session::ApplyOutputCommands() {
@@ -816,14 +858,63 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
         webcamPos = liveWebcamPos_;
     }
 
+    int captureIdx = 0;
     for (const auto& s : sources) {
         if (!s.enabled || layerCount >= 8) continue;
 
         if (s.type == SessionSourceType::Capture) {
-            const float w = (float)(s.w > 0 ? s.w : (int)canvasW);
-            const float h = (float)(s.h > 0 ? s.h : (int)canvasH);
-            pushLayer(sceneSrv_.Get(), (float)s.x, (float)s.y, w, h);
-            if (cfg_.chroma && cfg_.chromaLayer == 1) applyKey(layers[layerCount - 1]);
+            const int ci = captureIdx++;
+            if (ci == 0) {
+                const float w = (float)(s.w > 0 ? s.w : (int)canvasW);
+                const float h = (float)(s.h > 0 ? s.h : (int)canvasH);
+                pushLayer(sceneSrv_.Get(), (float)s.x, (float)s.y, w, h);
+                if (cfg_.chroma && cfg_.chromaLayer == 1) applyKey(layers[layerCount - 1]);
+            } else if ((size_t)(ci - 1) < extraCaps_.size()) {
+                ExtraCapture* e = extraCaps_[ci - 1].get();
+                Microsoft::WRL::ComPtr<ID3D11Texture2D> frame;
+                {
+                    std::lock_guard<std::mutex> lk(e->mu);
+                    frame = e->pending;
+                    e->pending.Reset();
+                }
+                if (frame) {
+                    D3D11_TEXTURE2D_DESC d{};
+                    frame->GetDesc(&d);
+                    if (!e->tex || e->w != d.Width || e->h != d.Height) {
+                        e->w = d.Width;
+                        e->h = d.Height;
+                        D3D11_TEXTURE2D_DESC td = d;
+                        td.Usage = D3D11_USAGE_DEFAULT;
+                        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                        td.CPUAccessFlags = 0;
+                        td.MiscFlags = 0;
+                        e->tex.Reset();
+                        e->srv.Reset();
+                        if (SUCCEEDED(
+                                d3d_.device->CreateTexture2D(&td, nullptr, e->tex.GetAddressOf())))
+                            e->srv = Compositor::CreateSrv(d3d_.device.Get(), e->tex.Get());
+                    }
+                    if (e->tex) d3d_.context->CopyResource(e->tex.Get(), frame.Get());
+                }
+                if (e->srv && e->w > 0) {
+                    float x, y, w, h;
+                    if (s.w > 0) {
+                        x = (float)s.x;
+                        y = (float)s.y;
+                        w = (float)s.w;
+                        h = (float)s.h;
+                    } else {
+                        const float margin = 16.f;
+                        w = canvasW / 3.0f;
+                        h = w * (float)e->h / (float)e->w;
+                        const bool left = s.corner == 0 || s.corner == 2;
+                        const bool top = s.corner == 0 || s.corner == 1;
+                        x = left ? margin : canvasW - w - margin;
+                        y = top ? margin : canvasH - h - margin;
+                    }
+                    pushLayer(e->srv.Get(), x, y, w, h);
+                }
+            }
         } else if (s.type == SessionSourceType::Webcam) {
             VideoLayer* v = FindVideo(s.device);
             if (!v || !v->cam) continue;

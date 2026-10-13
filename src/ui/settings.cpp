@@ -229,8 +229,13 @@ bool LoadUiSettings(UiSettings* s) {
         else if (key == "desktopGain") s->desktopGain = (float)atof(val.c_str());
         else if (key == "micGate") s->micGate = (val == "1");
         else if (key == "micGateDb") s->micGateDb = atoi(val.c_str());
+        else if (key == "micComp") s->micComp = (val == "1");
+        else if (key == "micCompDb") s->micCompDb = atoi(val.c_str());
+        else if (key == "micCompRatio") s->micCompRatio = atoi(val.c_str());
         else if (key == "idlePreview") s->idlePreview = (val == "1");
         else if (key == "closeToTray") s->closeToTray = (val == "1");
+        else if (key == "accent") s->accent = atoi(val.c_str());
+        else if (key == "light") s->light = (val == "1");
         else if (key == "webcam") s->webcam = (val == "1");
         else if (key == "webcamDevice") s->webcamDevice = val;
         else if (key == "webcamPos") s->webcamPos = val;
@@ -330,8 +335,13 @@ bool SaveUiSettings(const UiSettings& s) {
     f << "desktopGain=" << s.desktopGain << "\n";
     f << "micGate=" << (s.micGate ? 1 : 0) << "\n";
     f << "micGateDb=" << s.micGateDb << "\n";
+    f << "micComp=" << (s.micComp ? 1 : 0) << "\n";
+    f << "micCompDb=" << s.micCompDb << "\n";
+    f << "micCompRatio=" << s.micCompRatio << "\n";
     f << "idlePreview=" << (s.idlePreview ? 1 : 0) << "\n";
     f << "closeToTray=" << (s.closeToTray ? 1 : 0) << "\n";
+    f << "accent=" << s.accent << "\n";
+    f << "light=" << (s.light ? 1 : 0) << "\n";
     f << "webcam=" << (s.webcam ? 1 : 0) << "\n";
     f << "webcamDevice=" << s.webcamDevice << "\n";
     f << "webcamPos=" << s.webcamPos << "\n";

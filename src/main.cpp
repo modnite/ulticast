@@ -84,6 +84,9 @@ struct Options {
     float micGain = 1.0f;
     bool gate = false;
     int gateDb = -45;
+    bool comp = false;
+    int compDb = -18;
+    int compRatioX10 = 30;
     int audioBitrate = 160;
     int tracks = 1;
 
@@ -145,7 +148,8 @@ static void PrintUsage() {
         "Clips:    --replay  --replay-seconds N  --replay-prefix S  --hotkey F1..F24|none  --clip-at N\n"
         "Stream:   --platform NAME  --key KEY  --rtmp URL  --also-record PATH  --reconnect N\n"
         "Audio:    --no-audio  --no-desktop-audio  --mic  --mic-device NAME  --desktop-device NAME\n"
-        "          --mic-gain X  --desktop-gain X  --gate DB  --audio-bitrate N  --tracks 1|2\n\n"
+        "          --mic-gain X  --desktop-gain X  --gate DB  --comp DB  --comp-ratio R\n"
+        "          --audio-bitrate N  --tracks 1|2\n\n"
         "During a run: P pause/resume, R save clip, Q stop.\n");
 }
 
@@ -256,6 +260,8 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == L"--desktop-gain") takeF(o.desktopGain);
         else if (a == L"--audio-bitrate") takeInt(o.audioBitrate);
         else if (a == L"--gate") { o.gate = true; takeInt(o.gateDb); }
+        else if (a == L"--comp") { o.comp = true; takeInt(o.compDb); }
+        else if (a == L"--comp-ratio") { int r = 30; takeInt(r); o.compRatioX10 = r; }
         else if (a == L"--tracks") takeInt(o.tracks);
         else if (a == L"--platform") takeS(o.platform);
         else if (a == L"--key") takeS(o.streamKey);
@@ -435,6 +441,9 @@ int wmain(int argc, wchar_t** argv) {
     cfg.audio.micGain = o.micGain;
     cfg.audio.gate = o.gate;
     cfg.audio.gateDb = (float)o.gateDb;
+    cfg.audio.comp = o.comp;
+    cfg.audio.compDb = (float)o.compDb;
+    cfg.audio.compRatio = o.compRatioX10 / 10.0f;
     cfg.audio.bitrateKbps = o.audioBitrate;
     cfg.audio.tracks = streaming ? 1 : o.tracks;
     cfg.webcam = o.webcam;

@@ -57,20 +57,97 @@ constexpr UINT_PTR kTimerId = 1;
 constexpr float kWinW = 1060.f;
 constexpr float kWinH = 700.f;
 
-// palette (violet — as requested)
-const D2D1_COLOR_F kBg = D2D1::ColorF(0x120D1A);
-const D2D1_COLOR_F kPanel = D2D1::ColorF(0x1A1426);
-const D2D1_COLOR_F kPanel2 = D2D1::ColorF(0x241B36);
-const D2D1_COLOR_F kBorder = D2D1::ColorF(0x37274F);
-const D2D1_COLOR_F kText = D2D1::ColorF(0xEFEAF8);
-const D2D1_COLOR_F kTextDim = D2D1::ColorF(0x9B8FB5);
-const D2D1_COLOR_F kAccent = D2D1::ColorF(0xA855F7);
-const D2D1_COLOR_F kAccent2 = D2D1::ColorF(0x22D3EE);
-const D2D1_COLOR_F kRec = D2D1::ColorF(0xFF4D6D);
-const D2D1_COLOR_F kOk = D2D1::ColorF(0x34D399);
-const D2D1_COLOR_F kWarn = D2D1::ColorF(0xFBBF24);
-const D2D1_COLOR_F kWhite = D2D1::ColorF(0xFFFFFF);
-const D2D1_COLOR_F kBlack = D2D1::ColorF(0x000000);
+// palette -- mutable: ApplyTheme() fills these from the accent choice + light/dark
+D2D1_COLOR_F kBg, kPanel, kPanel2, kBorder, kText, kTextDim, kAccent, kAccent2, kRec, kOk, kWarn,
+    kWhite, kBlack, kHover, kHoverDown;
+
+struct AccentDef {
+    const wchar_t* name;
+    uint32_t rgb;
+};
+const AccentDef kAccents[] = {
+    {L"Violet", 0xA855F7}, {L"Cyan", 0x22D3EE},  {L"Emerald", 0x34D399}, {L"Amber", 0xFBBF24},
+    {L"Rose", 0xFB7185},   {L"Azure", 0x60A5FA}, {L"Magenta", 0xE879F9}, {L"Slate", 0x94A3B8},
+};
+constexpr int kAccentCount = (int)(sizeof(kAccents) / sizeof(kAccents[0]));
+
+static D2D1_COLOR_F Hsl(float h, float s, float l) {
+    // h in [0,1), s/l in [0,1]
+    auto hue2rgb = [](float p, float q, float t) {
+        if (t < 0.f) t += 1.f;
+        if (t > 1.f) t -= 1.f;
+        if (t < 1.f / 6.f) return p + (q - p) * 6.f * t;
+        if (t < 1.f / 2.f) return q;
+        if (t < 2.f / 3.f) return p + (q - p) * (2.f / 3.f - t) * 6.f;
+        return p;
+    };
+    float r, g, b;
+    if (s <= 0.f) {
+        r = g = b = l;
+    } else {
+        const float q = l < 0.5f ? l * (1.f + s) : l + s - l * s;
+        const float p = 2.f * l - q;
+        r = hue2rgb(p, q, h + 1.f / 3.f);
+        g = hue2rgb(p, q, h);
+        b = hue2rgb(p, q, h - 1.f / 3.f);
+    }
+    return D2D1::ColorF(r, g, b, 1.0f);
+}
+
+static void RgbToHsl(uint32_t rgb, float* h, float* s, float* l) {
+    const float r = ((rgb >> 16) & 0xFF) / 255.f, g = ((rgb >> 8) & 0xFF) / 255.f,
+                b = (rgb & 0xFF) / 255.f;
+    const float mx = (std::max)((std::max)(r, g), b), mn = (std::min)((std::min)(r, g), b);
+    *l = (mx + mn) / 2.f;
+    if (mx == mn) {
+        *h = 0.f;
+        *s = 0.f;
+        return;
+    }
+    const float d = mx - mn;
+    *s = *l > 0.5f ? d / (2.f - mx - mn) : d / (mx + mn);
+    if (mx == r)
+        *h = (g - b) / d + (g < b ? 6.f : 0.f);
+    else if (mx == g)
+        *h = (b - r) / d + 2.f;
+    else
+        *h = (r - g) / d + 4.f;
+    *h /= 6.f;
+}
+
+// Fills the palette from an accent + light/dark. Called at startup and whenever
+// the user picks a theme in Settings > Appearance.
+static void ApplyTheme(int accentIndex, bool light) {
+    const int ai = std::clamp(accentIndex, 0, kAccentCount - 1);
+    float h = 0.78f, s = 0.8f, l = 0.6f;
+    RgbToHsl(kAccents[ai].rgb, &h, &s, &l);
+    if (light) {
+        kBg = Hsl(h, 0.20f, 0.97f);
+        kPanel = Hsl(h, 0.22f, 0.935f);
+        kPanel2 = Hsl(h, 0.26f, 0.90f);
+        kBorder = Hsl(h, 0.24f, 0.80f);
+        kText = Hsl(h, 0.35f, 0.14f);
+        kTextDim = Hsl(h, 0.16f, 0.44f);
+        kHover = D2D1::ColorF(0.f, 0.f, 0.f, 0.05f);
+        kHoverDown = D2D1::ColorF(0.f, 0.f, 0.f, 0.10f);
+    } else {
+        kBg = Hsl(h, 0.30f, 0.075f);
+        kPanel = Hsl(h, 0.28f, 0.115f);
+        kPanel2 = Hsl(h, 0.30f, 0.165f);
+        kBorder = Hsl(h, 0.28f, 0.27f);
+        kText = Hsl(h, 0.22f, 0.93f);
+        kTextDim = Hsl(h, 0.15f, 0.62f);
+        kHover = D2D1::ColorF(1.f, 1.f, 1.f, 0.06f);
+        kHoverDown = D2D1::ColorF(0.f, 0.f, 0.f, 0.16f);
+    }
+    kAccent = Hsl(h, 0.72f, light ? 0.48f : 0.62f);
+    kAccent2 = Hsl(fmodf(h + 0.42f, 1.f), 0.70f, light ? 0.45f : 0.58f);
+    kRec = Hsl(0.97f, 0.72f, light ? 0.50f : 0.62f);
+    kOk = Hsl(0.42f, 0.60f, light ? 0.38f : 0.52f);
+    kWarn = Hsl(0.11f, 0.80f, light ? 0.42f : 0.60f);
+    kWhite = D2D1::ColorF(0xFFFFFF);
+    kBlack = D2D1::ColorF(0x000000);
+}
 
 enum {
     ID_START = 1,
@@ -124,6 +201,9 @@ enum {
     ID_TOGGLE_TRAYCLOSE,
     ID_TOGGLE_MICGATE,
     ID_SLIDER_GATEDB,
+    ID_TOGGLE_COMP,
+    ID_SLIDER_COMPDB,
+    ID_SLIDER_COMPRATIO,
     ID_FIELD_KEY,
     ID_FIELD_URL,
     ID_FIELD_CHROMA,
@@ -142,6 +222,8 @@ enum {
     ID_SRC_PROP_BASE = 4001,    // + source index: row click opens properties
     ID_SRC_TOGGLE_BASE = 4100,  // + source index: enable/disable
     ID_WINDOW_PICK = 4200,
+    ID_ACCENT_BASE = 5000,      // + accent index: theme swatches
+    ID_TOGGLE_LIGHT = 5100,
 };
 
 enum {
@@ -284,10 +366,12 @@ private:
     void DrawPreview(const D2D1_RECT_F& r);
     void DrawPreviewStats(const D2D1_RECT_F& r);
     void DrawTransport(int mode);  // 0 = record, 1 = stream, 2 = both
-    void DrawActivityStrip();
+    void DrawActivityStrip(const D2D1_RECT_F& r, int maxLines);
     void DrawPopup();
+    void ApplyCaptionTheme();
+    void ApplyThemeNow();  // palette + gradient + caption + repaint
     void Card(float x, float y, float w, float h, const std::wstring& title);
-    D2D1_RECT_F PreviewRect() const { return S(320, 64, 720, 300); }
+    D2D1_RECT_F PreviewRect() const { return S(320, 64, 720, 316); }
     // preview <-> canvas mapping for the draggable webcam PiP
     D2D1_RECT_F PreviewCanvasToDevice(const D2D1_RECT_F& pr, float cx, float cy, float cw,
                                       float ch) const;
@@ -311,7 +395,7 @@ private:
     void Combo(int id, const D2D1_RECT_F& r, const std::vector<std::wstring>& items, int* sel,
                bool enabled = true);
     void Slider(int id, const D2D1_RECT_F& r, int minV, int maxV, int* value,
-                const wchar_t* suffixFmt);
+                const wchar_t* suffixFmt, float displayScale = 1.0f);
     void SetSliderFromX(int id, float x);
     void Field(int id, const D2D1_RECT_F& r, std::wstring* text, bool password,
                const wchar_t* placeholder);
@@ -360,6 +444,7 @@ private:
     ComPtr<ID2D1Layer> layer_;
     ComPtr<ID2D1LinearGradientBrush> gradPrimary_;
     ComPtr<ID2D1PathGeometry> chevronGeo_;
+    ComPtr<ID2D1PathGeometry> playGeo_;
     ComPtr<IDWriteFactory> dwrite_;
     std::unordered_map<uint64_t, ComPtr<ID2D1SolidColorBrush>> brushes_;
 
@@ -413,6 +498,9 @@ private:
     std::wstring lastTitle_;
     bool lastGateOn_ = false;
     int lastGateDb_ = -45;
+    bool lastCompOn_ = false;
+    int lastCompDb_ = -18;
+    int lastCompRatio_ = 30;
     std::wstring keyText_, urlText_, chromaText_, browserText_;
 
     // pages + scenes
@@ -448,6 +536,7 @@ private:
     std::vector<std::wstring> SourceMenuItems() const;
     std::wstring SourceLabel(const UiSource& s) const;
     std::wstring SourceTag(const UiSource& s) const;
+    bool IsSecondaryCapture(int sourceIndex) const;
     void EnsureSceneDefaults(UiScene& scene) const;
     std::vector<SessionSource> SceneSources(const UiScene& sc) const;
     void DrawActionPopup();
@@ -534,10 +623,7 @@ bool UiApp::Init(HINSTANCE instance) {
     DWM_WINDOW_CORNER_PREFERENCE corner = DWMWCP_ROUND;
     DwmSetWindowAttribute(hwnd_, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
     // Purple caption/border to match the theme (Win11; ignored on Win10).
-    COLORREF caption = RGB(0x2A, 0x1B, 0x3D);
-    DwmSetWindowAttribute(hwnd_, 35 /*DWMWA_CAPTION_COLOR*/, &caption, sizeof(caption));
-    COLORREF borderColor = RGB(0x4C, 0x2D, 0x78);
-    DwmSetWindowAttribute(hwnd_, 34 /*DWMWA_BORDER_COLOR*/, &borderColor, sizeof(borderColor));
+    ApplyCaptionTheme();
 
     if (!InitGraphics()) {
         MessageBoxW(hwnd_, L"Direct2D initialization failed.", L"Ulticast", MB_ICONERROR);
@@ -545,6 +631,7 @@ bool UiApp::Init(HINSTANCE instance) {
     }
 
     LoadUiSettings(&settings_);
+    ApplyTheme(settings_.accent, settings_.light);  // palette before any drawing
     if (settings_.recordPath.empty()) settings_.recordPath = DefaultRecordingPath();
     ReloadDevices();
     ApplySettingsToUi();
@@ -650,15 +737,16 @@ bool UiApp::CreateDeviceResources() {
     layer_.Reset();
     gradPrimary_.Reset();
     chevronGeo_.Reset();
+    playGeo_.Reset();
 
     if (FAILED(dc_->CreateLayer(nullptr, layer_.GetAddressOf()))) return false;
 
-    // Primary-button gradient (violet, slightly deeper at the bottom edge).
+    // Primary-button fill (kept for the theme-tinted accents).
     D2D1_GRADIENT_STOP stops[2] = {};
     stops[0].position = 0.0f;
-    stops[0].color = D2D1::ColorF(0x8B6CFF);
+    stops[0].color = kAccent;
     stops[1].position = 1.0f;
-    stops[1].color = D2D1::ColorF(0x6B4AF0);
+    stops[1].color = kAccent;
     ComPtr<ID2D1GradientStopCollection> stopCollection;
     if (SUCCEEDED(dc_->CreateGradientStopCollection(stops, 2, stopCollection.GetAddressOf())))
         dc_->CreateLinearGradientBrush(
@@ -674,6 +762,17 @@ bool UiApp::CreateDeviceResources() {
         sink->AddLine(D2D1::Point2F(Px(3.5f), Px(-1.5f)));
         sink->EndFigure(D2D1_FIGURE_END_OPEN);
         sink->Close();
+    }
+
+    // Play triangle for "Go Live" (filled, translated into place when drawn).
+    ComPtr<ID2D1GeometrySink> psink;
+    if (SUCCEEDED(d2dFactory_->CreatePathGeometry(playGeo_.GetAddressOf())) &&
+        SUCCEEDED(playGeo_->Open(psink.GetAddressOf()))) {
+        psink->BeginFigure(D2D1::Point2F(0.f, 0.f), D2D1_FIGURE_BEGIN_FILLED);
+        psink->AddLine(D2D1::Point2F(0.f, Px(12)));
+        psink->AddLine(D2D1::Point2F(Px(11), Px(6)));
+        psink->EndFigure(D2D1_FIGURE_END_CLOSED);
+        psink->Close();
     }
     return true;
 }
@@ -777,27 +876,63 @@ void UiApp::Button(int id, const D2D1_RECT_F& r, const std::wstring& label, BtnS
     hits_.push_back({id, r, enabled});
     bool hover = enabled && hover_ == id;
     bool down = enabled && press_ == id;
-    auto rr = D2D1::RoundedRect(r, Px(8), Px(8));
+    auto rr = D2D1::RoundedRect(r, Px(10), Px(10));
 
-    if (style == BtnStyle::Primary && enabled && gradPrimary_) {
-        gradPrimary_->SetStartPoint(D2D1::Point2F(r.left, r.top));
-        gradPrimary_->SetEndPoint(D2D1::Point2F(r.left, r.bottom));
-        dc_->FillRoundedRectangle(rr, gradPrimary_.Get());
+    if (style == BtnStyle::Primary && enabled) {
+        // Flat accent fill + a hairline highlight along the top edge: reads as a
+        // solid button without the muddy gradient.
+        dc_->FillRoundedRectangle(rr, Br(kAccent));
+        dc_->FillRectangle(D2D1::RectF(r.left + Px(11), r.top + Px(1), r.right - Px(11),
+                                       r.top + Px(1.6f)),
+                           Br(WithAlpha(kWhite, 0.22f)));
+        dc_->DrawRoundedRectangle(rr, Br(WithAlpha(kWhite, 0.16f)), Px(1));
+        if (hover) dc_->FillRoundedRectangle(rr, Br(kHover));
+        if (down) dc_->FillRoundedRectangle(rr, Br(kHoverDown));
     } else if (style == BtnStyle::Danger && enabled) {
         dc_->FillRoundedRectangle(rr, Br(kRec));
+        dc_->FillRectangle(D2D1::RectF(r.left + Px(11), r.top + Px(1), r.right - Px(11),
+                                       r.top + Px(1.6f)),
+                           Br(WithAlpha(kWhite, 0.22f)));
+        dc_->DrawRoundedRectangle(rr, Br(WithAlpha(kWhite, 0.16f)), Px(1));
+        if (hover) dc_->FillRoundedRectangle(rr, Br(kHover));
+        if (down) dc_->FillRoundedRectangle(rr, Br(kHoverDown));
     } else {
         dc_->FillRoundedRectangle(rr, Br(enabled ? kPanel : WithAlpha(kPanel, 0.5f)));
         D2D1_COLOR_F border = !enabled ? WithAlpha(kBorder, 0.45f)
                                        : (hover ? WithAlpha(kAccent, 0.55f) : kBorder);
         dc_->DrawRoundedRectangle(rr, Br(border), Px(1));
+        if (hover) dc_->FillRoundedRectangle(rr, Br(kHover));
+        if (down) dc_->FillRoundedRectangle(rr, Br(kHoverDown));
     }
-    if (hover) dc_->FillRoundedRectangle(rr, Br(WithAlpha(kWhite, 0.06f)));
-    if (down) dc_->FillRoundedRectangle(rr, Br(WithAlpha(kBlack, 0.16f)));
 
-    D2D1_COLOR_F fg = (style == BtnStyle::Ghost)
-                          ? (enabled ? kText : WithAlpha(kTextDim, 0.55f))
-                          : WithAlpha(kWhite, enabled ? 1.0f : 0.5f);
-    Text(label, fmtBodyBold_, r, fg, DWRITE_TEXT_ALIGNMENT_CENTER);
+    const D2D1_COLOR_F fg = (style == BtnStyle::Ghost)
+                                ? (enabled ? kText : WithAlpha(kTextDim, 0.55f))
+                                : WithAlpha(kWhite, enabled ? 1.0f : 0.5f);
+
+    // Action buttons carry a glyph (record dot / play / stop square) so the
+    // state is readable at a glance; the glyph+label group is centred.
+    const bool glyphBtn = enabled && (id == ID_REC || id == ID_LIVE) && style != BtnStyle::Ghost;
+    if (glyphBtn) {
+        const float gl = Px(12), gap = Px(10);
+        const float tw = MeasureText(label, fmtBodyBold_.Get());
+        const float gx = (r.left + r.right) / 2 - (gl + gap + tw) / 2;
+        const float gy = (r.top + r.bottom) / 2;
+        const bool active = (id == ID_REC) ? stats_.recording : stats_.streaming;
+        if (active) {
+            dc_->FillRectangle(D2D1::RectF(gx, gy - gl / 2, gx + gl, gy + gl / 2), Br(fg));
+        } else if (id == ID_REC) {
+            dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(gx + gl / 2, gy), gl / 2, gl / 2),
+                             Br(fg));
+        } else if (playGeo_) {
+            dc_->SetTransform(D2D1::Matrix3x2F::Translation(gx, gy - gl / 2));
+            dc_->FillGeometry(playGeo_.Get(), Br(fg));
+            dc_->SetTransform(D2D1::Matrix3x2F::Identity());
+        }
+        Text(label, fmtBodyBold_,
+             D2D1::RectF(gx + gl + gap, r.top, r.right - Px(10), r.bottom), fg);
+    } else {
+        Text(label, fmtBodyBold_, r, fg, DWRITE_TEXT_ALIGNMENT_CENTER);
+    }
 }
 
 void UiApp::Toggle(int id, const D2D1_RECT_F& r, const std::wstring& label, bool* value,
@@ -877,7 +1012,7 @@ void UiApp::SetSliderFromX(int id, float x) {
 }
 
 void UiApp::Slider(int id, const D2D1_RECT_F& r, int minV, int maxV, int* value,
-                   const wchar_t* suffixFmt) {
+                   const wchar_t* suffixFmt, float displayScale) {
     hits_.push_back({id, r, true});
     sliderRects_[id] = r;
     sliderRange_[id] = {minV, maxV};
@@ -893,8 +1028,9 @@ void UiApp::Slider(int id, const D2D1_RECT_F& r, int minV, int maxV, int* value,
     D2D1_POINT_2F knob = D2D1::Point2F(r.left + (trackR - r.left) * t, cy);
     dc_->FillEllipse(D2D1::Ellipse(knob, Px(6), Px(6)), Br(kWhite));
     dc_->DrawEllipse(D2D1::Ellipse(knob, Px(6), Px(6)), Br(WithAlpha(kBlack, 0.28f)), Px(1));
-    Text(Format(suffixFmt, *value), fmtSmall_,
-         D2D1::RectF(trackR + Px(8), r.top, r.right, r.bottom), kTextDim,
+    Text(displayScale == 1.0f ? Format(suffixFmt, *value)
+                              : Format(suffixFmt, (double)(*value * displayScale)),
+         fmtSmall_, D2D1::RectF(trackR + Px(8), r.top, r.right, r.bottom), kTextDim,
          DWRITE_TEXT_ALIGNMENT_TRAILING);
 }
 
@@ -962,12 +1098,21 @@ void UiApp::Paint() {
     if (!sessionRunning_ && !stats_.failed) errorShown_ = false;
     UpdateWindowTitleState();
 
-    // Live audio-filter updates (gate on/off + threshold apply immediately).
+    // Live audio-filter updates (gate/compressor apply immediately).
     if (sessionRunning_ &&
         (settings_.micGate != lastGateOn_ || settings_.micGateDb != lastGateDb_)) {
         lastGateOn_ = settings_.micGate;
         lastGateDb_ = settings_.micGateDb;
         session_.SetAudioGate(settings_.micGate, (float)settings_.micGateDb);
+    }
+    if (sessionRunning_ && (settings_.micComp != lastCompOn_ ||
+                            settings_.micCompDb != lastCompDb_ ||
+                            settings_.micCompRatio != lastCompRatio_)) {
+        lastCompOn_ = settings_.micComp;
+        lastCompDb_ = settings_.micCompDb;
+        lastCompRatio_ = settings_.micCompRatio;
+        session_.SetAudioCompressor(settings_.micComp, (float)settings_.micCompDb,
+                                    settings_.micCompRatio / 10.0f);
     }
 
     RefreshPreview();
@@ -1211,7 +1356,6 @@ void UiApp::DrawModePage(bool recordMode) {
     else
         DrawStreamCards();
 
-    DrawActivityStrip();
     DrawTransport(recordMode ? 0 : 1);
 }
 
@@ -1258,7 +1402,7 @@ void UiApp::DrawSceneRail() {
     const UiScene& sc = scenes_[activeScene_];
     sourceRowRects_.assign(sc.sources.size(), D2D1_RECT_F{});
     for (size_t i = 0; i < sc.sources.size(); ++i) {
-        if (y > 540) break;  // keep the transport row reachable
+        if (y > 484) break;  // leave room for the cursor row + activity card
         D2D1_RECT_F row = S(x, y, w, 32);
         sourceRowRects_[i] = row;
         const int propId = ID_SRC_PROP_BASE + (int)i;
@@ -1278,8 +1422,18 @@ void UiApp::DrawSceneRail() {
     }
 
     // cursor is a scene-level source-like switch
-    if (y <= 540) {
+    if (y <= 520) {
         Toggle(ID_SRC_CURSOR, S(x, y, w, 32), L"Show Cursor", &scenes_[activeScene_].cursor);
+        y += 36;
+    }
+
+    // ACTIVITY fills whatever rail space is left (no dead space).
+    const float actTop = y + 8;
+    if (actTop < 624 - 70) {
+        Card(x, actTop, w, 624 - actTop, L"ACTIVITY");
+        int lines = (int)((624 - actTop - 36) / 14);
+        if (lines < 1) lines = 1;
+        DrawActivityStrip(S(x + 10, actTop + 30, w - 20, (float)lines * 14), lines);
     }
 }
 
@@ -1314,8 +1468,17 @@ std::wstring UiApp::SourceLabel(const UiSource& s) const {
     return L"Source";
 }
 
-std::vector<std::wstring> UiApp::SourceMenuItems() const {
-    return {L"Display Capture (monitor)", L"Window Capture", L"Game Capture (DXGI)",
+bool UiApp::IsSecondaryCapture(int sourceIndex) const {
+    if (scenes_.empty()) return false;
+    const UiScene& sc = scenes_[activeScene_];
+    if (sourceIndex < 0 || sourceIndex >= (int)sc.sources.size()) return false;
+    if (sc.sources[sourceIndex].type != SessionSourceType::Capture) return false;
+    for (int i = 0; i < sourceIndex; ++i)
+        if (sc.sources[i].type == SessionSourceType::Capture) return true;
+    return false;
+}
+
+std::vector<std::wstring> UiApp::SourceMenuItems() const {    return {L"Display Capture (monitor)", L"Window Capture", L"Game Capture (DXGI)",
             L"Video Capture Device (camera, capture card)", L"Microphone",
             L"Desktop Audio (system sound)", L"Browser Overlay"};
 }
@@ -1337,6 +1500,13 @@ void UiApp::BuildSourceProperties(int sourceIndex) {
                                     : L"Window: " + s.window);
             add(2, s.dxgi ? L"Game mode (DXGI duplication): on"
                           : L"Game mode (DXGI duplication): off");
+            if (IsSecondaryCapture(sourceIndex)) {
+                for (int c = 0; c < 4; ++c) {
+                    std::wstring label = L"Position: " + positions_[c];
+                    if (c == s.corner) label += L"  (current)";
+                    add(4, label, "", c);
+                }
+            }
             add(5, L"Remove source");
             break;
         case SessionSourceType::Webcam: {
@@ -1442,14 +1612,13 @@ void UiApp::AddSourceAt(int menuIndex) {
             s.dxgi = menuIndex == 2;
             if (menuIndex == 1 && selWindow_ > 0 && selWindow_ < (int)windows_.size())
                 s.window = windows_[selWindow_];
-            const int existing = findCapture();
-            if (existing >= 0) {
-                sc.sources[existing] = s;
-                statusText_ = L"Capture source replaced";
-            } else {
-                sc.sources.insert(sc.sources.begin(), s);
-                statusText_ = L"Capture source added";
-            }
+            s.corner = 3;
+            int captures = 0;
+            for (const UiSource& src : sc.sources)
+                if (src.type == SessionSourceType::Capture) ++captures;
+            sc.sources.push_back(s);
+            statusText_ = captures == 0 ? L"Capture source added"
+                                        : L"Capture added as a picture-in-picture layer";
             statusError_ = false;
             break;
         }
@@ -1492,6 +1661,26 @@ void UiApp::AddSourceAt(int menuIndex) {
     }
 }
 
+void UiApp::ApplyCaptionTheme() {
+    if (!hwnd_) return;
+    auto toRef = [](const D2D1_COLOR_F& c) {
+        return RGB((int)(c.r * 255.f + 0.5f), (int)(c.g * 255.f + 0.5f), (int)(c.b * 255.f + 0.5f));
+    };
+    COLORREF caption = toRef(kPanel);
+    DwmSetWindowAttribute(hwnd_, 35 /*DWMWA_CAPTION_COLOR*/, &caption, sizeof(caption));
+    COLORREF borderColor = toRef(kBorder);
+    DwmSetWindowAttribute(hwnd_, 34 /*DWMWA_BORDER_COLOR*/, &borderColor, sizeof(borderColor));
+    BOOL darkMode = settings_.light ? FALSE : TRUE;
+    DwmSetWindowAttribute(hwnd_, DWMWA_USE_IMMERSIVE_DARK_MODE, &darkMode, sizeof(darkMode));
+}
+
+void UiApp::ApplyThemeNow() {
+    ApplyTheme(settings_.accent, settings_.light);
+    CreateDeviceResources();  // the primary-button gradient follows the accent
+    ApplyCaptionTheme();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
 void UiApp::DrawActionPopup() {
     if (!openAction_) return;
     if (openAction_ == ID_ADD_SOURCE) {
@@ -1522,11 +1711,14 @@ void UiApp::DrawPreviewStats(const D2D1_RECT_F& r) {
                      strip.top + Px(34)),
          kText);
 
-    double fps = stats_.elapsed > 0.1 ? stats_.captured / stats_.elapsed : 0.0;
-    std::wstring line = Format(L"%.0f fps   ·   %.1f Mbps   ·   %s", fps, stats_.kbps / 1000.0,
+    double fps = (sessionRunning_ && stats_.elapsed > 0.1) ? stats_.captured / stats_.elapsed : 0.0;
+    const double mbps = sessionRunning_ ? stats_.kbps / 1000.0 : 0.0;
+    std::wstring line = Format(L"%.0f fps   ·   %.1f Mbps   ·   %s", fps, mbps,
                                Widen(stats_.backend).c_str());
-    if (stats_.width) line += Format(L"   ·   %ux%u", stats_.width, stats_.height);
-    line += Format(L"   ·   %llu dropped", (unsigned long long)stats_.dropped);
+    if (sessionRunning_ && stats_.width)
+        line += Format(L"   ·   %ux%u", stats_.width, stats_.height);
+    line += Format(L"   ·   %llu dropped",
+                   (unsigned long long)(sessionRunning_ ? stats_.dropped : 0));
     Text(line, fmtSmall_,
          D2D1::RectF(strip.right - Px(560), strip.top + Px(10), strip.right - Px(18),
                      strip.top + Px(28)),
@@ -1556,9 +1748,9 @@ void UiApp::DrawPreviewStats(const D2D1_RECT_F& r) {
 
 void UiApp::DrawRecordCards() {
     const float rowH = 40, gap = 8, pad = 10, headH = 18, cw = 212;
-    const float cy = 376;
+    const float cy = 392;
 
-    Card(320, cy, 232, pad + headH + 3 * rowH + 2 * gap + pad, L"RECORDING");
+    Card(320, cy, 232, pad + headH + 4 * rowH + 3 * gap + pad, L"RECORDING");
     float y = cy + pad + headH + 4;
     D2D1_RECT_F pathR = S(320 + pad, y, cw - 92, rowH);
     Panel(pathR, 8, kPanel, true);
@@ -1571,16 +1763,21 @@ void UiApp::DrawRecordCards() {
     y += rowH + gap;
     Text(L"Container: MKV (crash-safe)", fmtSmall_, S(320 + pad, y, cw, rowH),
          WithAlpha(kTextDim, 0.7f));
+    y += rowH + gap;
+    Button(ID_OPENFOLDER, S(320 + pad, y, cw, rowH), L"Open Folder", BtnStyle::Ghost);
 
-    Card(564, cy, 232, pad + headH + 3 * rowH + 2 * gap + pad, L"CLIPS");
+    Card(564, cy, 232, pad + headH + 4 * rowH + 3 * gap + pad, L"CLIPS");
     y = cy + pad + headH + 4;
     Toggle(ID_TOGGLE_REPLAY, S(564 + pad, y, cw, rowH), L"Replay", &settings_.replay);
     y += rowH + gap;
     Slider(ID_SLIDER_REPLAY, S(564 + pad, y, cw, rowH), 10, 120, &settings_.replaySeconds,
            L"%ds");
     y += rowH + gap;
-    Text(L"F9 = save the last moments", fmtSmall_, S(564 + pad, y, cw, rowH),
-         WithAlpha(kTextDim, 0.7f));
+    Text(settings_.replay ? L"F9 saves the last moments" : L"Arm the replay buffer above",
+         fmtSmall_, S(564 + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+    y += rowH + gap;
+    Button(ID_CLIP, S(564 + pad, y, cw, rowH), L"Save Clip (F9)", BtnStyle::Ghost,
+           stats_.replayArmed);
 
     Card(808, cy, 232, pad + headH + 4 * rowH + 3 * gap + pad, L"ENCODING");
     y = cy + pad + headH + 4;
@@ -1600,7 +1797,7 @@ void UiApp::DrawRecordCards() {
 
 void UiApp::DrawStreamCards() {
     const float rowH = 40, gap = 8, pad = 10, headH = 18, cw = 334;
-    const float cy = 376;
+    const float cy = 392;
 
     Card(320, cy, 354, pad + headH + 4 * rowH + 3 * gap + pad, L"PLATFORM");
     float y = cy + pad + headH + 4;
@@ -1631,11 +1828,11 @@ void UiApp::DrawStreamCards() {
 }
 
 void UiApp::DrawSettingsPage() {
-    const float rowH = 34, rowGap = 6, cardGap = 12, pad = 10, headH = 18;
+    const float rowH = 32, rowGap = 5, cardGap = 12, pad = 10, headH = 18;
 
-    // ---- left column: capture defaults, devices, browser
+    // ---- left column: capture defaults, devices, appearance, browser
     {
-        const float x = 20, w = 490, cw = w - 20;  // card content width
+        const float x = 20, w = 490, cw = w - 20;
         float cy = 64;
 
         Card(x, cy, w, pad + headH + 3 * rowH + 2 * rowGap + pad, L"CAPTURE DEFAULTS");
@@ -1649,7 +1846,7 @@ void UiApp::DrawSettingsPage() {
         Combo(ID_COMBO_GPU, S(x + pad, y, cw, rowH), gpus_, &selGpu_);
         cy += pad + headH + 3 * rowH + 2 * rowGap + pad + cardGap;
 
-        Card(x, cy, w, pad + headH + 6 * rowH + 5 * rowGap + pad, L"CAMERA & AUDIO DEFAULTS");
+        Card(x, cy, w, pad + headH + 5 * rowH + 4 * rowGap + pad, L"CAMERA & AUDIO DEFAULTS");
         y = cy + pad + headH + 4;
         Combo(ID_COMBO_WEBCAMDEV, S(x + pad, y, cw, rowH), webcams_, &selWebcam_);
         y += rowH + rowGap;
@@ -1664,13 +1861,39 @@ void UiApp::DrawSettingsPage() {
         Slider(ID_SLIDER_DESKGAIN, S(x + pad + 244, y, 226, rowH), 0, 200, &deskGainPct_,
                L"Desk %d%%");
         y += rowH + rowGap;
-        Toggle(ID_TOGGLE_MICGATE, S(x + pad, y, 130, rowH), L"Noise gate", &settings_.micGate);
-        Slider(ID_SLIDER_GATEDB, S(x + pad + 146, y, cw - 146, rowH), -80, -20,
-               &settings_.micGateDb, L"%d dB");
-        y += rowH + rowGap;
         Toggle(ID_TOGGLE_CHROMA, S(x + pad, y, 130, rowH), L"Chroma Key", &settings_.chroma);
         Field(ID_FIELD_CHROMA, S(x + pad + 146, y, 160, rowH), &chromaText_, false, L"00FF00");
-        cy += pad + headH + 6 * rowH + 5 * rowGap + pad + cardGap;
+        cy += pad + headH + 5 * rowH + 4 * rowGap + pad + cardGap;
+
+        // APPEARANCE: accent swatches + light/dark
+        Card(x, cy, w, pad + headH + rowH + pad, L"APPEARANCE");
+        y = cy + pad + headH + 4;
+        const float sw = Px(26), swGap = Px(8);
+        float sx = S(x + pad, 0, 0, 0).left;
+        const float sy = S(0, y, 0, rowH).top + Px((rowH - 26) / 2);
+        for (int i = 0; i < kAccentCount; ++i) {
+            D2D1_RECT_F sr = D2D1::RectF(sx, sy, sx + sw, sy + sw);
+            hits_.push_back({ID_ACCENT_BASE + i, sr, true});
+            D2D1_COLOR_F c = D2D1::ColorF(kAccents[i].rgb);
+            dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F((sr.left + sr.right) / 2,
+                                                         (sr.top + sr.bottom) / 2),
+                                           sw / 2 - Px(1), sw / 2 - Px(1)),
+                             Br(c));
+            if (settings_.accent == i)
+                dc_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F((sr.left + sr.right) / 2,
+                                                             (sr.top + sr.bottom) / 2),
+                                               sw / 2 + Px(2), sw / 2 + Px(2)),
+                                 Br(kText), Px(2));
+            else if (hover_ == ID_ACCENT_BASE + i)
+                dc_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F((sr.left + sr.right) / 2,
+                                                             (sr.top + sr.bottom) / 2),
+                                               sw / 2 + Px(1), sw / 2 + Px(1)),
+                                 Br(WithAlpha(kTextDim, 0.7f)), Px(1));
+            sx += sw + swGap;
+        }
+        Toggle(ID_TOGGLE_LIGHT, S(x + pad + 292, y, cw - 292, rowH), L"Light mode",
+               &settings_.light);
+        cy += pad + headH + rowH + pad + cardGap;
 
         Card(x, cy, w, pad + headH + rowH + pad, L"BROWSER OVERLAY");
         y = cy + pad + headH + 4;
@@ -1678,31 +1901,41 @@ void UiApp::DrawSettingsPage() {
               L"HTML file or https:// URL (add the source in a scene)");
     }
 
-    // ---- right column: defaults for new sources, behavior, misc
+    // ---- right column: audio filters, encoder, behavior, misc
     {
         const float x = 550, w = 490, cw = w - 20;
         float cy = 64;
 
-        Card(x, cy, w, pad + headH + 2 * rowH + rowGap + pad, L"ADVANCED ENCODER");
+        Card(x, cy, w, pad + headH + 3 * rowH + 2 * rowGap + pad, L"AUDIO FILTERS");
         float y = cy + pad + headH + 4;
+        Toggle(ID_TOGGLE_MICGATE, S(x + pad, y, 130, rowH), L"Noise gate", &settings_.micGate);
+        Slider(ID_SLIDER_GATEDB, S(x + pad + 146, y, cw - 146, rowH), -80, -20,
+               &settings_.micGateDb, L"%d dB");
+        y += rowH + rowGap;
+        Toggle(ID_TOGGLE_COMP, S(x + pad, y, 130, rowH), L"Compressor", &settings_.micComp);
+        Slider(ID_SLIDER_COMPDB, S(x + pad + 146, y, cw - 146, rowH), -40, -6,
+               &settings_.micCompDb, L"%d dB");
+        y += rowH + rowGap;
+        Slider(ID_SLIDER_COMPRATIO, S(x + pad, y, 226, rowH), 15, 60, &settings_.micCompRatio,
+               L"Ratio %.1f:1", 0.1f);
+        Text(L"-1 dB safety clip always on", fmtSmall_, S(x + pad + 244, y, cw - 244, rowH),
+             WithAlpha(kTextDim, 0.7f));
+        cy += pad + headH + 3 * rowH + 2 * rowGap + pad + cardGap;
+
+        Card(x, cy, w, pad + headH + rowH + pad, L"ADVANCED ENCODER");
+        y = cy + pad + headH + 4;
         Toggle(ID_TOGGLE_LOOKAHEAD, S(x + pad, y, 221, rowH), L"Lookahead", &settings_.lookahead);
         Toggle(ID_TOGGLE_MULTIPASS, S(x + pad + 249, y, 221, rowH), L"Two-pass",
                &settings_.multipass);
-        y += rowH + rowGap;
-        Text(L"Applies to recording, streaming and the replay buffer", fmtSmall_,
-             S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
-        cy += pad + headH + 2 * rowH + rowGap + pad + cardGap;
+        cy += pad + headH + rowH + pad + cardGap;
 
-        Card(x, cy, w, pad + headH + 2 * rowH + rowGap + pad, L"BEHAVIOR");
+        Card(x, cy, w, pad + headH + rowH + pad, L"BEHAVIOR");
         y = cy + pad + headH + 4;
         Toggle(ID_TOGGLE_IDLEPREVIEW, S(x + pad, y, 221, rowH), L"Idle preview",
                &settings_.idlePreview);
         Toggle(ID_TOGGLE_TRAYCLOSE, S(x + pad + 249, y, 221, rowH), L"Close to tray",
                &settings_.closeToTray);
-        y += rowH + rowGap;
-        Text(L"The camera opens only while recording, streaming or replay is armed", fmtSmall_,
-             S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
-        cy += pad + headH + 2 * rowH + rowGap + pad + cardGap;
+        cy += pad + headH + rowH + pad + cardGap;
 
         Card(x, cy, w, pad + headH + rowH + pad, L"TROUBLESHOOTING");
         y = cy + pad + headH + 4;
@@ -1711,14 +1944,21 @@ void UiApp::DrawSettingsPage() {
         Button(ID_OPENFOLDER, S(x + pad + 316, y, 154, rowH), L"Open Folder", BtnStyle::Ghost);
         cy += pad + headH + rowH + pad + cardGap;
 
-        Card(x, cy, w, pad + headH + 2 * rowH + rowGap + pad, L"ABOUT");
+        Card(x, cy, w, pad + headH + rowH + pad, L"ABOUT");
         y = cy + pad + headH + 4;
-        Text(Format(L"Ulticast %hs — %hs", ULTI_VERSION, ULTI_REPO), fmtSmall_,
+        Text(Format(L"Ulticast %hs  ·  %hs", ULTI_VERSION, ULTI_REPO), fmtSmall_,
              S(x + pad, y, cw, rowH), kTextDim);
-        y += rowH + rowGap;
-        Text(L"Scenes, sources and settings are stored in %APPDATA%\\Ulticast", fmtSmall_,
-             S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+        cy += pad + headH + rowH + pad + cardGap;
+
+        // Hints fill the rest of the column (no dead space).
+        Text(L"F9 saves a clip  ·  drag the webcam on the preview  ·  click a source row to configure it",
+             fmtSmall_, S(x + pad, cy + 6, cw, rowH), WithAlpha(kTextDim, 0.7f));
+        Text(L"The camera opens only while recording, streaming or replay is armed.", fmtSmall_,
+             S(x + pad, cy + 6 + 20, cw, rowH), WithAlpha(kTextDim, 0.7f));
     }
+
+    DrawActivityStrip(S(20, 606, 1020, 28), 2);
+    DrawTransport(2);  // both actions stay reachable from Settings
 }
 
 void UiApp::DrawTransport(int mode) {
@@ -1738,30 +1978,32 @@ void UiApp::DrawTransport(int mode) {
     }
     Button(ID_PAUSE, S(x, 640, 100, 44), stats_.paused ? L"Resume" : L"Pause", BtnStyle::Ghost,
            active);
-    x += 108;
-    Button(ID_CLIP, S(x, 640, 112, 44), L"Snap Clip", BtnStyle::Ghost, stats_.replayArmed);
-    if (mode != 1) Button(ID_OPENFOLDER, S(x + 120, 640, 132, 44), L"Open Folder", BtnStyle::Ghost);
+    if (mode == 2) {
+        Button(ID_CLIP, S(x + 108, 640, 112, 44), L"Snap Clip", BtnStyle::Ghost,
+               stats_.replayArmed);
+        Button(ID_OPENFOLDER, S(x + 228, 640, 132, 44), L"Open Folder", BtnStyle::Ghost);
+    }
     Button(ID_OPENLOGS, S(830, 640, 86, 44), L"Logs", BtnStyle::Ghost);
     Button(ID_REPORT, S(924, 640, 116, 44), L"Report Bug", BtnStyle::Ghost);
 }
 
-void UiApp::DrawActivityStrip() {
-    D2D1_RECT_F r = S(320, 604, 720, 28);
+void UiApp::DrawActivityStrip(const D2D1_RECT_F& r, int maxLines) {
     std::vector<std::wstring> lines;
     {
         std::lock_guard<std::mutex> lock(logMu_);
-        for (auto it = logLines_.rbegin(); it != logLines_.rend() && lines.size() < 2; ++it)
+        for (auto it = logLines_.rbegin(); it != logLines_.rend() && (int)lines.size() < maxLines;
+             ++it)
             lines.push_back(*it);
         std::reverse(lines.begin(), lines.end());
     }
     if (!statusText_.empty()) {
-        if (lines.size() < 2)
+        if ((int)lines.size() < maxLines)
             lines.push_back(statusText_);
-        else
+        else if (!lines.empty())
             lines.back() = statusText_;
     }
     if (lines.empty()) {
-        Text(L"Ready", fmtSmall_, r, WithAlpha(kTextDim, 0.55f));
+        Text(L"Ready", fmtSmall_, Inset(r, 2, 0), WithAlpha(kTextDim, 0.55f));
         return;
     }
     const float lineH = Px(14);
@@ -2241,6 +2483,9 @@ SessionConfig UiApp::BuildConfig() {
     cfg.audio.desktopGain = settings_.desktopGain;
     cfg.audio.gate = settings_.micGate;
     cfg.audio.gateDb = (float)settings_.micGateDb;
+    cfg.audio.comp = settings_.micComp;
+    cfg.audio.compDb = (float)settings_.micCompDb;
+    cfg.audio.compRatio = settings_.micCompRatio / 10.0f;
     cfg.audio.tracks = 1;
     cfg.webcamDevice = (selWebcam_ > 0 && selWebcam_ < (int)webcams_.size())
                            ? webcams_[selWebcam_]
@@ -2379,7 +2624,8 @@ void UiApp::StopSession() {
 }
 
 void UiApp::StartPreview() {
-    if (sessionRunning_ || !settings_.idlePreview) return;
+    if (!settings_.idlePreview) return;
+    if (session_.GetStats().running) return;  // live state, not the cached flag
     SessionConfig cfg = BuildConfig();
     // Preview only: capture + composite + the shared preview texture. No file or
     // stream outputs. The camera/browser/audio start only when the replay buffer
@@ -2407,6 +2653,7 @@ void UiApp::StopPreview() {
     if (!previewSession_) return;
     session_.Stop();
     previewSession_ = false;
+    sessionRunning_ = false;  // the cached flag must not outlive the session
 }
 
 void UiApp::RestartPreview() {
@@ -2442,6 +2689,14 @@ void UiApp::OnAction(int id) {
             ApplyLiveScene();
         }
         openCombo_ = -1;
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+    if (id >= ID_ACCENT_BASE && id < ID_ACCENT_BASE + kAccentCount) {
+        settings_.accent = id - ID_ACCENT_BASE;
+        SyncSettingsFromUi();
+        SaveUiSettings(settings_);
+        ApplyThemeNow();
         InvalidateRect(hwnd_, nullptr, FALSE);
         return;
     }
@@ -2587,6 +2842,11 @@ void UiApp::OnAction(int id) {
             } else {
                 StopPreview();
             }
+            break;
+        case ID_TOGGLE_LIGHT:
+            SyncSettingsFromUi();
+            SaveUiSettings(settings_);
+            ApplyThemeNow();
             break;
         case ID_TAB_LIVE:
         case ID_TAB_RECORD:
@@ -2830,7 +3090,8 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (press_ == ID_SLIDER_CQP || press_ == ID_SLIDER_REPLAY ||
                 press_ == ID_SLIDER_BFRAMES || press_ == ID_SLIDER_MICGAIN ||
                 press_ == ID_SLIDER_DESKGAIN || press_ == ID_SLIDER_RECONNECT ||
-                press_ == ID_SLIDER_GATEDB) {
+                press_ == ID_SLIDER_GATEDB || press_ == ID_SLIDER_COMPDB ||
+                press_ == ID_SLIDER_COMPRATIO) {
                 dragging_ = press_;
                 SetSliderFromX(press_, x);
             }
@@ -2861,7 +3122,7 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                             ID_TOGGLE_MIC, ID_TOGGLE_REPLAY, ID_TOGGLE_CHROMA,
                             ID_TOGGLE_BROWSER, ID_TOGGLE_LOOKAHEAD, ID_TOGGLE_MULTIPASS,
                             ID_TOGGLE_IDLEPREVIEW, ID_TOGGLE_TRAYCLOSE, ID_TOGGLE_MICGATE,
-                            ID_SRC_CURSOR}) {
+                            ID_TOGGLE_COMP, ID_TOGGLE_LIGHT, ID_SRC_CURSOR}) {
                 if (press_ == tid) {
                     bool* target = nullptr;
                     switch (tid) {
@@ -2878,6 +3139,8 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         case ID_TOGGLE_IDLEPREVIEW: target = &settings_.idlePreview; break;
                         case ID_TOGGLE_TRAYCLOSE: target = &settings_.closeToTray; break;
                         case ID_TOGGLE_MICGATE: target = &settings_.micGate; break;
+                        case ID_TOGGLE_COMP: target = &settings_.micComp; break;
+                        case ID_TOGGLE_LIGHT: target = &settings_.light; break;
                         case ID_SRC_CURSOR: target = &scenes_[activeScene_].cursor; break;
                     }
                     if (target) *target = !*target;

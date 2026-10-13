@@ -47,6 +47,9 @@ struct UiSettings {
     float desktopGain = 1.0f;
     bool micGate = false;   // mic noise gate
     int micGateDb = -45;    // gate threshold in dBFS
+    bool micComp = false;   // mic compressor
+    int micCompDb = -18;    // compressor threshold in dBFS
+    int micCompRatio = 30;  // ratio x10 (30 = 3.0:1)
 
     bool webcam = false;
     std::string webcamDevice;  // UTF-8 substring; empty = default camera
@@ -79,6 +82,8 @@ struct UiSettings {
 
     bool idlePreview = true;    // capture-only preview while not recording
     bool closeToTray = false;   // X keeps running in the tray instead of exiting
+    int accent = 0;             // index into the accent table (Violet default)
+    bool light = false;         // light theme instead of dark
 
     int hotkey = VK_F9;
 };

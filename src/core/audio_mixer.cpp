@@ -12,8 +12,14 @@ bool AudioMixer::Prepare(const AudioConfig& cfg, int sampleRate, std::string* er
     gateHoldSamples_ = (int)(0.120f * sampleRate);
     gateEnv_ = 1.f;
     gateHold_ = 0;
+    compOn_ = cfg.comp;
+    compDb_ = cfg.compDb;
+    compRatio_ = cfg.compRatio;
+    compEnv_ = 0.f;
     if (cfg.gate)
         std::printf("[audio] mic noise gate on (%.0f dB)\n", cfg.gateDb);
+    if (cfg.comp)
+        std::printf("[audio] mic compressor on (%.0f dB, %.1f:1)\n", cfg.compDb, cfg.compRatio);
     if (encMix_) {
         encMix_->Shutdown();
         encMix_.reset();
@@ -157,6 +163,28 @@ void AudioMixer::Pump() {
         } else if (gateEnv_ != 1.f) {
             gateEnv_ = 1.f;
             gateHold_ = 0;
+        }
+
+        // Mic compressor: reduce anything above the threshold by the ratio,
+        // then a -1 dBFS safety clip so the mix never hard-clips.
+        if (compOn_.load()) {
+            const float thr = powf(10.f, compDb_.load() / 20.f);
+            const float ratio = compRatio_.load() < 1.f ? 1.f : compRatio_.load();
+            const float atk = 1.f - expf(-1.f / (0.005f * (float)sampleRate_));  // ~5 ms
+            const float rel = 1.f - expf(-1.f / (0.120f * (float)sampleRate_));  // ~120 ms
+            const float ceil = 0.891f;  // -1 dBFS
+            for (int i = 0; i < F; ++i) {
+                const float peak = (std::max)(fabsf(m[2 * i]), fabsf(m[2 * i + 1]));
+                compEnv_ += (peak - compEnv_) * (peak > compEnv_ ? atk : rel);
+                float gain = 1.f;
+                if (compEnv_ > thr && compEnv_ > 1e-6f)
+                    gain = (thr + (compEnv_ - thr) / ratio) / compEnv_;
+                float l = m[2 * i] * gain, r = m[2 * i + 1] * gain;
+                m[2 * i] = std::clamp(l, -ceil, ceil);
+                m[2 * i + 1] = std::clamp(r, -ceil, ceil);
+            }
+        } else if (compEnv_ != 0.f) {
+            compEnv_ = 0.f;
         }
 
         // Diagnostics: how much real audio went in vs media time emitted.

@@ -153,6 +153,10 @@ public:
     void SetAudioSourcesLive(bool desktop, bool mic) { mixer_.SetLiveSources(desktop, mic); }
     // Mic noise gate (threshold in dBFS); safe to call while running.
     void SetAudioGate(bool on, float db) { mixer_.SetGate(on, db); }
+    // Mic compressor (threshold dBFS, ratio); safe to call while running.
+    void SetAudioCompressor(bool on, float db, float ratio) {
+        mixer_.SetCompressor(on, db, ratio);
+    }
 
     // Runtime output control (OBS-style separate buttons). Commands are queued
     // and applied on the capture thread between frames, so they never race with
@@ -254,6 +258,23 @@ private:
     std::vector<VideoLayer> videos_;
     VideoLayer* FindVideo(const std::string& device);
     void StartVideoSources();
+
+    // Secondary capture sources (a second monitor/window as its own layer).
+    // Each owns a WGC capture; its callback only parks the newest frame (the
+    // D3D immediate context is not thread-safe) and the main tick composites it.
+    struct ExtraCapture {
+        std::unique_ptr<WgcCapture> cap;
+        std::mutex mu;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> pending;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> tex;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+        uint32_t w = 0, h = 0;
+        int monitor = 0;
+        std::wstring window;
+    };
+    std::vector<std::unique_ptr<ExtraCapture>> extraCaps_;
+    void StartExtraCaptures();
+    void StopExtraCaptures();
 
     bool audioReady_ = false;
     bool webcamOn_ = false;

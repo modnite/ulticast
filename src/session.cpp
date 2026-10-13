@@ -190,6 +190,10 @@ bool Session::Start(const SessionConfig& cfg, std::string* err) {
 
     t0_ = std::chrono::steady_clock::now();
     lastElapsed_ = 0.0;
+    // Output timers: the UI shows these, not the session age (the idle preview
+    // is a session too, and it must not tick a recording timer).
+    recStart_ = cfg_.record ? t0_ : std::chrono::steady_clock::time_point{};
+    strStart_ = cfg_.stream ? t0_ : std::chrono::steady_clock::time_point{};
     running_ = true;
     supervisor_ = std::thread(&Session::Supervisor, this);
     return true;
@@ -457,6 +461,7 @@ bool Session::BeginRecording(const std::string& path) {
     recBaseAudio_ = lastAudioPts_.load();
     forceIdrRec_ = true;
     recOn_ = true;
+    recStart_ = std::chrono::steady_clock::now();
     Log("[record] %s", out.c_str());
     return true;
 }
@@ -464,6 +469,7 @@ bool Session::BeginRecording(const std::string& path) {
 void Session::EndRecording() {
     if (!recOn_.load()) return;
     recOn_ = false;
+    recStart_ = {};
     recMux_.Close();
     recEnc_.Shutdown();
     Log("[record] stopped");
@@ -522,6 +528,7 @@ bool Session::BeginStreaming(const std::string& url, uint32_t bitrateKbps) {
     failures_ = 0;
     recon_ = false;
     strOn_ = true;
+    strStart_ = std::chrono::steady_clock::now();
     Log("[stream] %s", target.c_str());
     return true;
 }
@@ -529,6 +536,7 @@ bool Session::BeginStreaming(const std::string& url, uint32_t bitrateKbps) {
 void Session::EndStreaming() {
     if (!strOn_.load()) return;
     strOn_ = false;
+    strStart_ = {};
     recon_ = false;
     strMux_.Close();
     strEnc_.Shutdown();
@@ -1325,6 +1333,13 @@ Session::Stats Session::GetStats() const {    Stats st;
         st.error = failErr_;
     }
     st.elapsed = ElapsedSeconds();
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (recOn_.load() && recStart_ != std::chrono::steady_clock::time_point{})
+            st.recSeconds = std::chrono::duration<double>(now - recStart_).count();
+        if (strOn_.load() && strStart_ != std::chrono::steady_clock::time_point{})
+            st.strSeconds = std::chrono::duration<double>(now - strStart_).count();
+    }
     st.captured = pacedFrames_.load();
     st.encoded = encoded_.load();
     st.failedFrames = failedFrames_.load();

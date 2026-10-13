@@ -17,6 +17,28 @@ Built from scratch to have the smallest possible per-frame cost on the capture p
 
 Nothing driver-related is bundled: encoding uses the NVENC runtime that ships with your NVIDIA driver.
 
+### Windows SmartScreen ("Windows protected your PC")
+
+The binaries aren't Authenticode-signed yet, so Windows marks the download as *from the internet*
+and SmartScreen shows its usual prompt. Two ways to handle it:
+
+- **Right now, any build:** remove the download mark — right-click the file → **Properties** →
+  tick **Unblock** → **OK**, or in PowerShell: `Unblock-File .\Ulticast-Setup-x.y.z.exe`.
+  The prompt disappears because the file is no longer treated as an internet download.
+- **Proper fix, one secret away:** the pipeline is already wired for signing. Add two repository
+  secrets and every release is signed automatically:
+  - `SIGNING_PFX_BASE64` — `[Convert]::ToBase64String([IO.File]::ReadAllBytes('cert.pfx'))`
+  - `SIGNING_PFX_PASSWORD` — the `.pfx` password
+
+  The workflow then signs `ulticast.exe` and `ulticast-ui.exe` before packing, and Inno Setup signs
+  the installer **and** the uninstaller stub with the same certificate. Locally:
+  `tools\sign.ps1 -PfxPath cert.pfx -PfxPassword ***`.
+
+  Certificate options: **EV** code-signing certs earn SmartScreen trust immediately (~$400/yr);
+  **OV** certs build reputation as downloads accumulate (~$200/yr); **Azure Trusted Signing** is
+  Microsoft's cloud service (~$10/month, requires identity validation). All three work with the
+  secrets above — no code changes needed.
+
 ## Bug reports & diagnostics
 
 Everything needed for a good report is built in:

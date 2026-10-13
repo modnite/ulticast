@@ -1560,6 +1560,9 @@ void UiApp::BuildSourceProperties(int sourceIndex) {
             add(5, L"Remove source");
             break;
         case SessionSourceType::Browser:
+            add(8, browserText_.empty()
+                       ? L"Set the overlay URL in Settings…"
+                       : L"Overlay: " + browserText_ + L"   (open Settings…)");
             add(5, L"Remove source");
             break;
     }
@@ -1607,6 +1610,10 @@ void UiApp::ApplySourceProperty(int sourceIndex, int itemIndex) {
         case 7:  // audio device
             s.device = it.value;
             break;
+        case 8:  // jump to the overlay URL in Settings
+            page_ = 2;
+            openAction_ = 0;
+            return;
     }
     SyncSettingsFromUi();
     SaveUiSettings(settings_);
@@ -1879,9 +1886,14 @@ void UiApp::DrawPreviewStats(const D2D1_RECT_F& r) {
         D2D1::RectF(r.left + Px(1), r.bottom - stripH, r.right - Px(1), r.bottom - Px(1));
     dc_->FillRectangle(strip, Br(WithAlpha(kBlack, 0.5f)));
 
-    Text(FormatTime(stats_.elapsed), fmtMono_,
-         D2D1::RectF(strip.left + Px(18), strip.top + Px(4), strip.left + Px(170),
-                     strip.top + Px(34)),
+    // Timer = the current output's runtime, not the app session age (the idle
+    // preview is a session too and must not tick a recording timer).
+    const bool timing = stats_.recording || stats_.streaming;
+    const double timerSeconds = stats_.recording ? stats_.recSeconds : stats_.strSeconds;
+    Text(timing ? FormatTime(timerSeconds)
+                : (previewSession_ ? L"PREVIEW" : L"00:00"),
+         fmtMono_, D2D1::RectF(strip.left + Px(18), strip.top + Px(4), strip.left + Px(170),
+                               strip.top + Px(34)),
          kText);
 
     double fps = (sessionRunning_ && stats_.elapsed > 0.1) ? stats_.captured / stats_.elapsed : 0.0;
@@ -2852,8 +2864,9 @@ void UiApp::StartPreview() {
     if (session_.GetStats().running) return;  // live state, not the cached flag
     SessionConfig cfg = BuildConfig();
     // Preview only: capture + composite + the shared preview texture. No file or
-    // stream outputs. The camera/browser/audio start only when the replay buffer
-    // is armed (it is an output: clips need the full scene).
+    // stream outputs. The browser overlay runs whenever its source is enabled
+    // (it has no exclusive resource); the camera/audio start only when the
+    // replay buffer is armed, so they stay free for other apps.
     const bool replayOn = settings_.replay;
     cfg.record = false;
     cfg.stream = false;
@@ -2862,7 +2875,7 @@ void UiApp::StartPreview() {
     cfg.audio.desktop = replayOn && settings_.desktopAudio;
     cfg.audio.mic = replayOn && settings_.mic;
     cfg.webcam = replayOn && SceneUsesWebcam();
-    cfg.browser = replayOn && SceneUsesBrowser() && !browserText_.empty();
+    cfg.browser = SceneUsesBrowser() && !browserText_.empty();
     if (!cfg.browser) cfg.browserUrl.clear();
     std::string err;
     if (!session_.Start(cfg, &err)) {
@@ -2996,7 +3009,7 @@ void UiApp::OnAction(int id) {
             }
             break;
         case ID_ADD_SOURCE:
-            openAction_ = ID_ADD_SOURCE;
+            openAction_ = (openAction_ == ID_ADD_SOURCE) ? 0 : ID_ADD_SOURCE;
             actionRect_ = addMenuRect_;
             break;
         case ID_TWITCH_CONNECT:
@@ -3069,9 +3082,6 @@ void UiApp::OnAction(int id) {
                 statusError_ = false;
             }
             break;
-        case ID_TOGGLE_RECORD:
-        case ID_TOGGLE_STREAM:
-        case ID_TOGGLE_WEBCAM:
         case ID_TOGGLE_DESKTOP:
         case ID_TOGGLE_MIC:
             // value already toggled by the widget handler
@@ -3123,9 +3133,6 @@ void UiApp::OnAction(int id) {
         case ID_SRC_BROWSER:
         case ID_SRC_CURSOR:
             // Live changes apply immediately when running.
-            if (sessionRunning_) ApplyLiveScene();
-            break;
-        case ID_COMBO_CORNER:
             if (sessionRunning_) ApplyLiveScene();
             break;
         default:
@@ -3327,6 +3334,18 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     break;
                 }
             }
+            // A click that is not on the open popup (its items are hits) or on the
+            // popup's own button closes it -- no more "stuck" menus. Escape too.
+            const bool onPopupItem = press_ >= ID_ITEM_BASE && press_ < ID_ITEM_BASE + 64;
+            const bool onPopupOwner =
+                (press_ != 0 && press_ == openCombo_) ||
+                (press_ == ID_ADD_SOURCE && openAction_ == ID_ADD_SOURCE);
+            if ((openAction_ || openCombo_ >= 0) && !onPopupItem && !onPopupOwner) {
+                openAction_ = 0;
+                openCombo_ = -1;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+
             if (press_ == ID_SLIDER_CQP || press_ == ID_SLIDER_REPLAY ||
                 press_ == ID_SLIDER_BFRAMES || press_ == ID_SLIDER_MICGAIN ||
                 press_ == ID_SLIDER_DESKGAIN || press_ == ID_SLIDER_RECONNECT ||
@@ -3359,22 +3378,17 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
 
             // toggles act immediately
-            for (int tid : {ID_TOGGLE_RECORD, ID_TOGGLE_STREAM, ID_TOGGLE_WEBCAM, ID_TOGGLE_DESKTOP,
-                            ID_TOGGLE_MIC, ID_TOGGLE_REPLAY, ID_TOGGLE_CHROMA,
-                            ID_TOGGLE_BROWSER, ID_TOGGLE_LOOKAHEAD, ID_TOGGLE_MULTIPASS,
+            for (int tid : {ID_TOGGLE_REPLAY, ID_TOGGLE_DESKTOP, ID_TOGGLE_MIC,
+                            ID_TOGGLE_CHROMA, ID_TOGGLE_LOOKAHEAD, ID_TOGGLE_MULTIPASS,
                             ID_TOGGLE_IDLEPREVIEW, ID_TOGGLE_TRAYCLOSE, ID_TOGGLE_MICGATE,
                             ID_TOGGLE_COMP, ID_TOGGLE_LIGHT, ID_TOGGLE_MONITOR, ID_SRC_CURSOR}) {
                 if (press_ == tid) {
                     bool* target = nullptr;
                     switch (tid) {
-                        case ID_TOGGLE_RECORD: target = &settings_.record; break;
-                        case ID_TOGGLE_STREAM: target = &settings_.stream; break;
-                        case ID_TOGGLE_WEBCAM: target = &settings_.webcam; break;
+                        case ID_TOGGLE_REPLAY: target = &settings_.replay; break;
                         case ID_TOGGLE_DESKTOP: target = &settings_.desktopAudio; break;
                         case ID_TOGGLE_MIC: target = &settings_.mic; break;
-                        case ID_TOGGLE_REPLAY: target = &settings_.replay; break;
                         case ID_TOGGLE_CHROMA: target = &settings_.chroma; break;
-                        case ID_TOGGLE_BROWSER: target = &settings_.browser; break;
                         case ID_TOGGLE_LOOKAHEAD: target = &settings_.lookahead; break;
                         case ID_TOGGLE_MULTIPASS: target = &settings_.multipass; break;
                         case ID_TOGGLE_IDLEPREVIEW: target = &settings_.idlePreview; break;
@@ -3521,7 +3535,9 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_KEYDOWN: {
-            if (focus_ && wp == VK_ESCAPE) {
+            if (wp == VK_ESCAPE) {
+                openAction_ = 0;
+                openCombo_ = -1;
                 focus_ = 0;
                 InvalidateRect(hwnd, nullptr, FALSE);
             }

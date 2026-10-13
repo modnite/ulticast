@@ -25,3 +25,6 @@ test/Replay*.mkv
 *.7z
 .vs/
 *.user
+
+# Local installer output (CI builds this)
+installer/Output/

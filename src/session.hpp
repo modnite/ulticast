@@ -118,6 +118,8 @@ public:
         bool failed = false;
         std::string error;
         double elapsed = 0;
+        double recSeconds = 0;   // how long the current recording has run
+        double strSeconds = 0;   // how long the current stream has run
         uint64_t captured = 0;
         uint64_t encoded = 0;
         uint64_t failedFrames = 0;
@@ -235,6 +237,7 @@ private:
     std::atomic<double> lastElapsed_{0.0};
     std::chrono::steady_clock::time_point t0_{};
     std::chrono::steady_clock::time_point lastFrameTime_{};
+    std::chrono::steady_clock::time_point recStart_{}, strStart_{};
     std::thread supervisor_;
     mutable std::mutex previewMu_;
 

@@ -13,6 +13,12 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
+    env:
+      # Optional Authenticode signing (set both secrets to enable):
+      #   SIGNING_PFX_BASE64   base64 of the .pfx (cert + private key)
+      #   SIGNING_PFX_PASSWORD its password
+      SIGNING_PFX_BASE64: ${{ secrets.SIGNING_PFX_BASE64 }}
+      SIGNING_PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -38,6 +44,29 @@ jobs:
           Copy-Item "THIRD_PARTY_NOTICES.md" dist
           Get-ChildItem dist | Select-Object Name,Length | Format-Table -AutoSize
 
+      - name: Import signing certificate
+        if: env.SIGNING_PFX_BASE64 != ''
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'codesign.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_PFX_BASE64))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw 'signtool.exe not found' }
+          "SIGN_PFX=$pfx" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "SIGN_SIGNTOOL=$($signtool.FullName)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          Write-Host "Signing enabled ($($signtool.FullName))"
+
+      - name: Sign binaries
+        if: env.SIGNING_PFX_BASE64 != ''
+        shell: pwsh
+        run: |
+          foreach ($f in @('dist\ulticast.exe', 'dist\ulticast-ui.exe')) {
+            & $env:SIGN_SIGNTOOL sign /fd SHA256 /f $env:SIGN_PFX /p $env:SIGNING_PFX_PASSWORD `
+              /tr http://timestamp.digicert.com /td SHA256 /v $f
+            if ($LASTEXITCODE -ne 0) { throw "signing failed: $f" }
+          }
+
       - name: Build installer
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
@@ -48,7 +77,20 @@ jobs:
             "C:\Program Files\Inno Setup 6\ISCC.exe"
           ) | Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $iscc) { throw "Inno Setup not found on this runner" }
-          & $iscc "/DAppVersion=$ver" "installer\ulticast.iss"
+          $args = @("/DAppVersion=$ver")
+          if ($env:SIGN_PFX) {
+            # Sign the setup exe and the uninstaller stub with the same cert.
+            $cmd = "$($env:SIGN_SIGNTOOL) sign /fd SHA256 /f $($env:SIGN_PFX) /p $($env:SIGNING_PFX_PASSWORD) /tr http://timestamp.digicert.com /td SHA256 `$f"
+            $args += "/DSignToolName=ulisign"
+            $args += "/Sulisign=$cmd"
+          }
+          & $iscc @args "installer\ulticast.iss"
+
+      - name: Remove signing certificate
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:SIGN_PFX -and (Test-Path $env:SIGN_PFX)) { Remove-Item $env:SIGN_PFX -Force }
 
       - name: Package portable zip
         shell: pwsh
@@ -65,6 +107,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          body: |
+            **Installing:** run `Ulticast-Setup-<version>.exe` (it closes any running
+            Ulticast itself, including a tray-hidden instance).
+
+            If Windows shows *"Windows protected your PC"* (SmartScreen) for the download:
+            right-click the file → **Properties** → tick **Unblock** → **OK**, or run
+            `Unblock-File .\Ulticast-Setup-<version>.exe` in PowerShell. That removes the
+            "downloaded from the internet" mark and the prompt goes away.
           files: |
             Ulticast-portable-*.zip
             installer/Output/Ulticast-Setup-*.exe

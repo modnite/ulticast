@@ -25,6 +25,13 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.19041
+; Code signing: when the build passes /DSignToolName=... plus a matching
+; /S"name=..." tool definition, the setup exe *and* the uninstaller stub are
+; Authenticode-signed. Unsigned builds behave exactly as before.
+#ifdef SignToolName
+SignTool={#SignToolName}
+SignedUninstaller=yes
+#endif
 ; The [Code] section below closes any running Ulticast itself (including the
 ; tray-hidden UI and its CEF helper processes). Restart Manager cannot do that
 ; reliably, so it is switched off to avoid the "close these applications"

@@ -247,6 +247,9 @@ bool LoadUiSettings(UiSettings* s) {
         else if (key == "streamHevc") s->streamHevc = (val == "1");
         else if (key == "streamReconnect") s->streamReconnect = atoi(val.c_str());
         else if (key == "platform") s->platform = val;
+        else if (key == "twitchClientId") s->twitchClientId = val;
+        else if (key == "twitchChannel") s->twitchChannel = val;
+        else if (key == "twitchTokenEnc") s->twitchRefreshToken = UnprotectKey(val);
         else if (key == "streamKeyEnc") s->streamKey = UnprotectKey(val);
         else if (key == "customUrl") s->customUrl = val;
         else if (key == "replay") s->replay = (val == "1");
@@ -311,6 +314,11 @@ bool SaveUiSettings(const UiSettings& s) {
         encrypted = ProtectKey(s.streamKey);
         if (encrypted.empty()) return false;
     }
+    std::string twitchEnc;
+    if (!s.twitchRefreshToken.empty()) {
+        twitchEnc = ProtectKey(s.twitchRefreshToken);
+        if (twitchEnc.empty()) return false;
+    }
 
     std::ofstream f(SettingsPath(), std::ios::trunc);
     if (!f) return false;
@@ -354,6 +362,9 @@ bool SaveUiSettings(const UiSettings& s) {
     f << "streamHevc=" << (s.streamHevc ? 1 : 0) << "\n";
     f << "streamReconnect=" << s.streamReconnect << "\n";
     f << "platform=" << s.platform << "\n";
+    f << "twitchClientId=" << s.twitchClientId << "\n";
+    f << "twitchChannel=" << s.twitchChannel << "\n";
+    f << "twitchTokenEnc=" << twitchEnc << "\n";
     f << "streamKeyEnc=" << encrypted << "\n";
     f << "customUrl=" << s.customUrl << "\n";
     f << "replay=" << (s.replay ? 1 : 0) << "\n";

@@ -80,6 +80,9 @@ Please attach `diagnostics-*.txt` and the newest log to
   sources per scene (second monitor/window as a PiP layer), DirectShow camera fallback, audio device
   auto-recovery, themes (8 accents + light/dark), dead-space-free layout, cleaner action buttons with
   record/play/stop glyphs — built and tested locally (12/12 smoke tests)
+- **Stage 12** (unreleased): Twitch OAuth device-code login (connect once, stream key stays current),
+  DirectShow camera fallback, mic monitoring, audio device auto-recovery — built and tested locally
+  (12/12 smoke tests; Twitch flow verified against the live API)
 - Next: lock in, then release; on-hardware validation on the RTX 3080 rig
 
 ## The UI (Ulticast-ui.exe)
@@ -182,7 +185,7 @@ Ulticast --platform twitch --key <key> --also-record backup.mkv
 | Clips | `--replay`, `--replay-seconds`, `--replay-prefix`, `--hotkey`, `--clip-at` |
 | Stream | `--platform`, `--key`, `--rtmp URL`, `--also-record PATH`, `--reconnect N` |
 | Audio | `--no-audio`, `--no-desktop-audio`, `--mic`, `--mic-device`, `--desktop-device`, `--mic-gain X`, `--desktop-gain X`, `--gate DB`, `--comp DB`, `--comp-ratio R`, `--monitor-mic`, `--audio-bitrate N`, `--tracks 1\|2` |
-| Diagnostics | `--diagnostics`, `--open-logs`, `--version` |
+| Diagnostics | `--diagnostics`, `--open-logs`, `--version`, `--twitch-login [--twitch-client-id ID]` |
 
 ## Streaming targets
 
@@ -192,6 +195,20 @@ Ulticast --platform twitch --key <key> --also-record backup.mkv
 | YouTube | `rtmps://a.rtmps.youtube.com/live2` |
 | Facebook | `rtmps://live-api-s.facebook.com:443/rtmp/` |
 | Kick / other | custom RTMP/RTMPS URL |
+
+### Twitch account (no stream key pasting)
+
+Ulticast ships a registered public Twitch client and uses the **OAuth device-code flow** — no
+secret, no redirect, nothing to configure:
+
+- In the UI: **Stream → Twitch Account → Connect Twitch**. A code appears and the activation page
+  opens in your browser; enter the code and the app fetches your channel name and stream key
+  automatically (the key is stored DPAPI-encrypted like any pasted key). Afterwards the button
+  becomes **Refresh stream key**, which silently refreshes the token and re-reads the key.
+- From a terminal: `ulticast.exe --twitch-login` prints the code, waits for confirmation, then
+  prints the channel and stream key.
+
+Scopes requested: `channel:read:stream_key` only.
 
 ## Known limitations
 
@@ -208,11 +225,14 @@ Ulticast --platform twitch --key <key> --also-record backup.mkv
 
 ## Roadmap
 
-- **Twitch login (OAuth)** instead of pasting a stream key — requires an app registration and the
-  device-code flow.
+- Everything on the original roadmap is done; next is on-hardware validation on the RTX 3080 rig
+  and whatever that turns up.
 
 ### Done
 
+- **Twitch login (OAuth device-code flow)**: Connect Twitch in the UI (or `--twitch-login` on the
+  CLI) links the account and pulls the stream key automatically; tokens are refreshed silently and
+  stored DPAPI-encrypted.
 - **Audio filters, part 1**: mic noise gate with live threshold (`--gate DB`).
 - **Audio filters, part 2**: mic compressor with live threshold/ratio and a -1 dB safety clip
   (`--comp DB`, `--comp-ratio R`).

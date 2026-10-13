@@ -64,6 +64,9 @@ struct UiSettings {
     bool streamHevc = false;        // H.264 by default (Twitch etc.)
     int streamReconnect = 5;        // reconnect attempts
     std::string platform = "twitch";
+    std::string twitchClientId;      // empty = built-in app id
+    std::string twitchRefreshToken;  // DPAPI-encrypted in the ini
+    std::string twitchChannel;       // linked channel display name
     std::string streamKey;
     std::string customUrl;
 

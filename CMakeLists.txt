@@ -37,6 +37,7 @@ add_library(ulticast_core STATIC
     src/core/compositor.cpp
     src/core/webcam_mf.cpp
     src/core/capture_dshow.cpp
+    src/core/twitch_auth.cpp
     src/core/replay_buffer.cpp
     src/core/browser_cef.cpp
     src/core/diag.cpp
@@ -68,6 +69,7 @@ target_link_libraries(ulticast_core PUBLIC
     oleaut32
     user32
     version
+    winhttp
     libcef_dll_wrapper
     "${CEF_ROOT}/$<CONFIG>/libcef.lib"
     ${CEF_STANDARD_LIBS}

@@ -43,6 +43,7 @@
 #include "../core/webcam_mf.hpp"
 #include "../core/capture_dshow.hpp"
 #include "../core/capture_wgc.hpp"
+#include "../core/twitch_auth.hpp"
 #include "../session.hpp"
 
 using Microsoft::WRL::ComPtr;
@@ -226,6 +227,9 @@ enum {
     ID_WINDOW_PICK = 4200,
     ID_ACCENT_BASE = 5000,      // + accent index: theme swatches
     ID_TOGGLE_LIGHT = 5100,
+    ID_TWITCH_CONNECT = 5200,
+    ID_TWITCH_DISCONNECT,
+    ID_FIELD_TWITCHCID,
 };
 
 enum {
@@ -563,6 +567,21 @@ private:
     // idle preview (capture-only session while not recording)
     bool previewSession_ = false;
 
+    // Twitch OAuth: the device-code flow runs on a worker thread; Paint picks
+    // the results up (single-threaded UI stays untouched).
+    enum class TwitchState { Idle, Working, WaitingAuth, Connected, Failed };
+    std::atomic<int> twitchState_{0};
+    std::mutex twitchMu_;
+    std::wstring twitchStatus_;
+    std::string twitchUserCode_, twitchVerifyUri_, twitchKey_, twitchRefreshNew_, twitchDisplay_;
+    bool twitchOpenActivate_ = false;
+    std::thread twitchThread_;
+    int lastTwitchState_ = 0;
+    std::wstring twitchClientIdText_;
+    void StartTwitchConnect();
+    void TwitchWorker(std::string clientId, std::string refreshToken, bool refreshOnly);
+    void HandleTwitchStateChange();
+
     // webcam drag on the preview
     bool draggingWebcam_ = false;
     float dragOffX_ = 0, dragOffY_ = 0;
@@ -656,6 +675,8 @@ bool UiApp::Init(HINSTANCE instance) {
 }
 
 void UiApp::Shutdown() {
+    exiting_ = true;
+    if (twitchThread_.joinable()) twitchThread_.join();
     if (hwnd_) {
         KillTimer(hwnd_, kTimerId);
         UnregisterHotKey(hwnd_, 1);
@@ -1100,6 +1121,7 @@ void UiApp::Paint() {
     if (!sessionRunning_) previewSession_ = false;
     if (!sessionRunning_ && !stats_.failed) errorShown_ = false;
     UpdateWindowTitleState();
+    HandleTwitchStateChange();
 
     // Live audio-filter updates (gate/compressor apply immediately).
     if (sessionRunning_ &&
@@ -1688,6 +1710,150 @@ void UiApp::ApplyThemeNow() {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
+void UiApp::StartTwitchConnect() {
+    const int st = twitchState_.load();
+    if (st == (int)TwitchState::Working || st == (int)TwitchState::WaitingAuth) return;
+    if (twitchThread_.joinable()) twitchThread_.join();
+
+    SyncSettingsFromUi();
+    SaveUiSettings(settings_);
+    const std::string clientId =
+        settings_.twitchClientId.empty() ? Twitch::kDefaultClientId : settings_.twitchClientId;
+    if (clientId.empty()) {
+        statusText_ = L"Set a Twitch Client ID first";
+        statusError_ = true;
+        return;
+    }
+    // With a stored refresh token the flow is silent: refresh, then re-fetch
+    // the stream key (Twitch rotates keys only on request, but this keeps the
+    // token fresh and confirms the link still works).
+    const bool refreshOnly = !settings_.twitchRefreshToken.empty();
+    {
+        std::lock_guard<std::mutex> lk(twitchMu_);
+        twitchStatus_ = refreshOnly ? L"Refreshing Twitch token…" : L"Requesting a device code…";
+    }
+    twitchThread_ = std::thread(&UiApp::TwitchWorker, this, clientId,
+                                settings_.twitchRefreshToken, refreshOnly);
+}
+
+void UiApp::TwitchWorker(std::string clientId, std::string refreshToken, bool refreshOnly) {
+    auto setStatus = [&](const std::wstring& s) {
+        std::lock_guard<std::mutex> lk(twitchMu_);
+        twitchStatus_ = s;
+    };
+    auto setState = [&](TwitchState st) { twitchState_.store((int)st); };
+
+    Twitch::Tokens tokens;
+    std::string err;
+    if (refreshOnly) {
+        setState(TwitchState::Working);
+        if (!Twitch::Refresh(clientId, refreshToken, &tokens, &err)) {
+            setStatus(L"Twitch refresh failed: " + Widen(err));
+            setState(TwitchState::Failed);
+            return;
+        }
+    } else {
+        setState(TwitchState::Working);
+        Twitch::DeviceCode code;
+        if (!Twitch::RequestDeviceCode(clientId, &code, &err)) {
+            setStatus(L"Twitch connect failed: " + Widen(err));
+            setState(TwitchState::Failed);
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lk(twitchMu_);
+            twitchUserCode_ = code.userCode;
+            twitchVerifyUri_ = code.verificationUri;
+            twitchStatus_ = L"Code " + Widen(code.userCode) + L" at twitch.tv/activate";
+        }
+        twitchOpenActivate_ = true;
+        setState(TwitchState::WaitingAuth);
+
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(code.expiresIn);
+        int interval = code.interval;
+        for (;;) {
+            // Interruptible sleep so closing the app never waits on the poll.
+            for (int i = 0; i < interval * 10 && !exiting_; ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (exiting_) return;
+            if (std::chrono::steady_clock::now() > deadline) {
+                setStatus(L"Twitch code expired — try again");
+                setState(TwitchState::Failed);
+                return;
+            }
+            const Twitch::Poll p = Twitch::PollToken(clientId, code, &tokens, &err);
+            if (p == Twitch::Poll::Authorized) break;
+            if (p == Twitch::Poll::Pending) continue;
+            if (p == Twitch::Poll::SlowDown) {
+                interval += 2;
+                continue;
+            }
+            setStatus(p == Twitch::Poll::Denied ? L"Twitch authorization was denied"
+                                                : L"Twitch connect failed: " + Widen(err));
+            setState(TwitchState::Failed);
+            return;
+        }
+    }
+
+    setState(TwitchState::Working);
+    setStatus(L"Fetching your channel and stream key…");
+    if (!Twitch::FetchUser(clientId, &tokens, &err)) {
+        setStatus(L"Twitch user lookup failed: " + Widen(err));
+        setState(TwitchState::Failed);
+        return;
+    }
+    std::string key;
+    if (!Twitch::FetchStreamKey(clientId, tokens, &key, &err)) {
+        setStatus(L"Stream key lookup failed: " + Widen(err));
+        setState(TwitchState::Failed);
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(twitchMu_);
+        twitchKey_ = key;
+        twitchRefreshNew_ = tokens.refresh;
+        twitchDisplay_ = tokens.displayName;
+        twitchStatus_ = L"Connected as " + Widen(tokens.displayName);
+    }
+    setState(TwitchState::Connected);
+}
+
+void UiApp::HandleTwitchStateChange() {
+    const int st = twitchState_.load();
+    if (st == lastTwitchState_) return;
+    lastTwitchState_ = st;
+    if (st == (int)TwitchState::Connected) {
+        std::lock_guard<std::mutex> lk(twitchMu_);
+        settings_.streamKey = twitchKey_;
+        settings_.twitchRefreshToken = twitchRefreshNew_;
+        settings_.twitchChannel = twitchDisplay_;
+        keyText_ = Widen(settings_.streamKey);
+        selPlatform_ = 0;  // Twitch
+        SaveUiSettings(settings_);
+        AddLog(L"Twitch: connected as " + Widen(twitchDisplay_));
+        statusText_ = L"Twitch connected — stream key updated";
+        statusError_ = false;
+    } else if (st == (int)TwitchState::Failed) {
+        std::lock_guard<std::mutex> lk(twitchMu_);
+        statusText_ = twitchStatus_;
+        statusError_ = true;
+        AddLog(L"Twitch: " + twitchStatus_);
+    } else if (st == (int)TwitchState::WaitingAuth) {
+        AddLog(L"Twitch: waiting for the browser confirmation");
+    }
+    if (twitchOpenActivate_) {
+        twitchOpenActivate_ = false;
+        std::string uri;
+        {
+            std::lock_guard<std::mutex> lk(twitchMu_);
+            uri = twitchVerifyUri_;
+        }
+        if (uri.empty()) uri = "https://www.twitch.tv/activate";
+        ShellExecuteW(nullptr, L"open", Widen(uri).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+}
+
 void UiApp::DrawActionPopup() {
     if (!openAction_) return;
     if (openAction_ == ID_ADD_SOURCE) {
@@ -1803,35 +1969,63 @@ void UiApp::DrawRecordCards() {
 }
 
 void UiApp::DrawStreamCards() {
-    const float rowH = 40, gap = 8, pad = 10, headH = 18, cw = 334;
+    const float rowH = 40, gap = 8, pad = 10, headH = 18, cw = 212;
     const float cy = 392;
 
-    Card(320, cy, 354, pad + headH + 4 * rowH + 3 * gap + pad, L"PLATFORM");
+    Card(320, cy, 232, pad + headH + 4 * rowH + 3 * gap + pad, L"PLATFORM");
     float y = cy + pad + headH + 4;
     Combo(ID_COMBO_PLATFORM, S(320 + pad, y, cw, rowH), platforms_, &selPlatform_);
     y += rowH + gap;
     if (platformKeys_[selPlatform_] == "custom")
         Field(ID_FIELD_URL, S(320 + pad, y, cw, rowH), &urlText_, false, L"rtmp:// ingest URL");
     else
-        Field(ID_FIELD_KEY, S(320 + pad, y, cw, rowH), &keyText_, true, L"Stream key (paste)");
+        Field(ID_FIELD_KEY, S(320 + pad, y, cw, rowH), &keyText_, true, L"Stream key");
     y += rowH + gap;
     Slider(ID_SLIDER_RECONNECT, S(320 + pad, y, cw, rowH), 1, 10, &settings_.streamReconnect,
            L"%dx");
     y += rowH + gap;
-    Text(L"Press Go Live to start streaming", fmtSmall_, S(320 + pad, y, cw, rowH),
+    Text(L"Press Go Live to start", fmtSmall_, S(320 + pad, y, cw, rowH),
          WithAlpha(kTextDim, 0.7f));
 
-    Card(686, cy, 354, pad + headH + 4 * rowH + 3 * gap + pad, L"STREAM QUALITY");
+    Card(564, cy, 232, pad + headH + 4 * rowH + 3 * gap + pad, L"STREAM QUALITY");
     y = cy + pad + headH + 4;
-    Field(ID_FIELD_STREAMBITRATE, S(686 + pad, y, cw, rowH), &streamBitrateText_, false,
+    Field(ID_FIELD_STREAMBITRATE, S(564 + pad, y, cw, rowH), &streamBitrateText_, false,
           L"Bitrate kbps (CBR)");
     y += rowH + gap;
-    Combo(ID_COMBO_STREAMCODEC, S(686 + pad, y, cw, rowH), streamCodecs_, &selStreamCodec_);
+    Combo(ID_COMBO_STREAMCODEC, S(564 + pad, y, cw, rowH), streamCodecs_, &selStreamCodec_);
     y += rowH + gap;
-    Combo(ID_COMBO_PRESET, S(686 + pad, y, cw, rowH), presets_, &selPreset_);
+    Combo(ID_COMBO_PRESET, S(564 + pad, y, cw, rowH), presets_, &selPreset_);
     y += rowH + gap;
-    Text(L"CBR — pick a bitrate your upload can hold", fmtSmall_, S(686 + pad, y, cw, rowH),
+    Text(L"CBR — match your upload", fmtSmall_, S(564 + pad, y, cw, rowH),
          WithAlpha(kTextDim, 0.7f));
+
+    // TWITCH ACCOUNT: connect once, then the stream key keeps itself current.
+    Card(808, cy, 232, pad + headH + 4 * rowH + 3 * gap + pad, L"TWITCH ACCOUNT");
+    y = cy + pad + headH + 4;
+    {
+        std::lock_guard<std::mutex> lk(twitchMu_);
+        const bool connected = !settings_.twitchChannel.empty();
+        std::wstring st = twitchStatus_;
+        if (st.empty())
+            st = connected ? (L"Connected as " + Widen(settings_.twitchChannel))
+                           : L"Not connected — paste a key or connect";
+        Text(st, fmtSmall_, S(808 + pad, y, cw, rowH), connected ? kOk : WithAlpha(kTextDim, 0.8f));
+    }
+    y += rowH + gap;
+    {
+        const bool connected = !settings_.twitchChannel.empty();
+        const int st = twitchState_.load();
+        const bool busy = st == (int)TwitchState::Working || st == (int)TwitchState::WaitingAuth;
+        Button(ID_TWITCH_CONNECT, S(808 + pad, y, cw, rowH),
+               busy ? L"Waiting…" : (connected ? L"Refresh stream key" : L"Connect Twitch"),
+               BtnStyle::Primary, !busy);
+        y += rowH + gap;
+        Button(ID_TWITCH_DISCONNECT, S(808 + pad, y, cw, rowH), L"Disconnect", BtnStyle::Ghost,
+               connected && !busy);
+        y += rowH + gap;
+        Field(ID_FIELD_TWITCHCID, S(808 + pad, y, cw, rowH), &twitchClientIdText_, false,
+              L"Client ID (optional)");
+    }
 }
 
 void UiApp::DrawSettingsPage() {
@@ -2229,6 +2423,7 @@ void UiApp::ApplySettingsToUi() {
     browserText_ = Widen(settings_.browserUrl);
     bitrateText_ = Format(L"%u", settings_.recordBitrate);
     streamBitrateText_ = Format(L"%u", settings_.streamBitrate);
+    twitchClientIdText_ = Widen(settings_.twitchClientId);
     micGainPct_ = (int)std::lround(settings_.micGain * 100.0f);
     deskGainPct_ = (int)std::lround(settings_.desktopGain * 100.0f);
     selRate_ = settings_.recordCbr ? 1 : 0;
@@ -2308,6 +2503,7 @@ void UiApp::SyncSettingsFromUi() {
     settings_.streamBitrate =
         (uint32_t)std::clamp(_wtoi(streamBitrateText_.c_str()), 100, 200000);
     settings_.streamHevc = selStreamCodec_ == 1;
+    settings_.twitchClientId = Narrow(twitchClientIdText_);
     settings_.micGain = micGainPct_ / 100.0f;
     settings_.desktopGain = deskGainPct_ / 100.0f;
     settings_.desktopDevice = (selDesk_ > 0 && selDesk_ < (int)desktops_.size())
@@ -2803,6 +2999,22 @@ void UiApp::OnAction(int id) {
             openAction_ = ID_ADD_SOURCE;
             actionRect_ = addMenuRect_;
             break;
+        case ID_TWITCH_CONNECT:
+            StartTwitchConnect();
+            break;
+        case ID_TWITCH_DISCONNECT:
+            settings_.twitchRefreshToken.clear();
+            settings_.twitchChannel.clear();
+            SaveUiSettings(settings_);
+            {
+                std::lock_guard<std::mutex> lk(twitchMu_);
+                twitchStatus_.clear();
+            }
+            twitchState_.store((int)TwitchState::Idle);
+            lastTwitchState_ = (int)TwitchState::Idle;
+            statusText_ = L"Twitch disconnected";
+            statusError_ = false;
+            break;
         case ID_BROWSE: {            wchar_t file[MAX_PATH] = {};
             MultiByteToWideChar(CP_UTF8, 0, settings_.recordPath.c_str(), -1, file, MAX_PATH);
             OPENFILENAMEW ofn{};
@@ -3134,7 +3346,8 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             // text fields: focus on click
             int newFocus = 0;
             for (int fid : {ID_FIELD_KEY, ID_FIELD_URL, ID_FIELD_CHROMA, ID_FIELD_BROWSER,
-                            ID_SCENE_NAME, ID_FIELD_BITRATE, ID_FIELD_STREAMBITRATE}) {
+                            ID_SCENE_NAME, ID_FIELD_BITRATE, ID_FIELD_STREAMBITRATE,
+                            ID_FIELD_TWITCHCID}) {
                 auto it = fieldRects_.find(fid);
                 if (it != fieldRects_.end() && x >= it->second.left && x < it->second.right &&
                     y >= it->second.top && y < it->second.bottom)
@@ -3263,6 +3476,7 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             else if (focus_ == ID_SCENE_NAME) target = &sceneName_;
             else if (focus_ == ID_FIELD_BITRATE) target = &bitrateText_;
             else if (focus_ == ID_FIELD_STREAMBITRATE) target = &streamBitrateText_;
+            else if (focus_ == ID_FIELD_TWITCHCID) target = &twitchClientIdText_;
             if (!target) return 0;
             if (c == 8) {  // backspace
                 if (!target->empty()) target->pop_back();

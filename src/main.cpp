@@ -24,6 +24,7 @@
 #include "core/d3d.hpp"
 #include "core/diag.hpp"
 #include "core/log.hpp"
+#include "core/twitch_auth.hpp"
 #include "core/version.hpp"
 #include "core/wasapi_capture.hpp"
 #include "core/webcam_mf.hpp"
@@ -60,6 +61,8 @@ struct Options {
     bool diagnostics = false;
     bool version = false;
     bool openLogs = false;
+    bool twitchLogin = false;
+    std::string twitchClientId;
     int monitor = 0;
     int adapter = -1;
     std::string backend = "auto";
@@ -138,6 +141,7 @@ static void PrintUsage() {
         "No arguments launches the UI. Flags drive a headless session:\n\n"
         "  Ulticast --list | --list-audio\n"
         "  Ulticast --diagnostics          system/device report for bug reports\n"
+        "  Ulticast --twitch-login         link a Twitch account (device code) and print the stream key\n"
         "  Ulticast --version\n"
         "  Ulticast [--monitor N | --window \"title\"] [options]\n"
         "  Ulticast --platform twitch --key <streamkey> [options]\n\n"
@@ -206,6 +210,8 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == L"--diagnostics") o.diagnostics = true;
         else if (a == L"--open-logs") o.openLogs = true;
         else if (a == L"--version" || a == L"-V") o.version = true;
+        else if (a == L"--twitch-login") o.twitchLogin = true;
+        else if (a == L"--twitch-client-id") takeS(o.twitchClientId);
         else if (a == L"--monitor") takeInt(o.monitor);
         else if (a == L"--adapter") takeInt(o.adapter);
         else if (a == L"--backend") takeS(o.backend);
@@ -300,6 +306,58 @@ int wmain(int argc, wchar_t** argv) {
     if (o.openLogs) {
         std::string dir = Diag::LogDir();
         ShellExecuteW(nullptr, L"open", Widen(dir).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        return 0;
+    }
+
+    if (o.twitchLogin) {
+        // Headless device-code login: prints the code, waits for the browser
+        // confirmation, then prints the channel and stream key.
+        const std::string clientId =
+            o.twitchClientId.empty() ? Twitch::kDefaultClientId : o.twitchClientId;
+        Twitch::DeviceCode code;
+        std::string err;
+        if (!Twitch::RequestDeviceCode(clientId, &code, &err)) {
+            std::printf("ERROR: %s\n", err.c_str());
+            return 2;
+        }
+        std::printf("\n1. Open %s\n2. Enter this code: %s\n\nWaiting for confirmation...\n",
+                    code.verificationUri.c_str(), code.userCode.c_str());
+        std::fflush(stdout);  // the code must be visible while we poll
+        ShellExecuteW(nullptr, L"open", Widen(code.verificationUri).c_str(), nullptr, nullptr,
+                      SW_SHOWNORMAL);
+
+        Twitch::Tokens tokens;
+        int interval = code.interval;
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(code.expiresIn);
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::seconds(interval));
+            if (std::chrono::steady_clock::now() > deadline) {
+                std::printf("ERROR: the code expired; run --twitch-login again\n");
+                return 2;
+            }
+            const Twitch::Poll p = Twitch::PollToken(clientId, code, &tokens, &err);
+            if (p == Twitch::Poll::Authorized) break;
+            if (p == Twitch::Poll::Pending) continue;
+            if (p == Twitch::Poll::SlowDown) {
+                interval += 2;
+                continue;
+            }
+            std::printf("ERROR: %s\n", err.c_str());
+            return 2;
+        }
+        if (!Twitch::FetchUser(clientId, &tokens, &err)) {
+            std::printf("ERROR: %s\n", err.c_str());
+            return 2;
+        }
+        std::string key;
+        if (!Twitch::FetchStreamKey(clientId, tokens, &key, &err)) {
+            std::printf("ERROR: %s\n", err.c_str());
+            return 2;
+        }
+        std::printf("Linked channel : %s\n", tokens.displayName.c_str());
+        std::printf("Stream key     : %s\n", key.c_str());
+        std::printf("\nThe UI stores this automatically when you press Connect Twitch there.\n");
         return 0;
     }
 

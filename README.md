@@ -104,10 +104,10 @@ Please attach `diagnostics-*.txt` and the newest log to
   record/play/stop glyphs — built and tested locally (12/12 smoke tests)
 - **Stage 12** Twitch OAuth device-code login (connect once, stream key stays current),
   DirectShow camera fallback, mic monitoring, audio device auto-recovery — released in v0.9.0
-- **Stage 13** (unreleased): clip-hotkey picker (F6–F12/Off), MKV/MP4 container choice, separate
+- **Stage 13** clip-hotkey picker (F6–F12/Off), MKV/MP4 container choice, separate
   mic track, source z-order chevrons, 250 ms scene crossfade, per-output encoder settings
-  (record vs stream), per-source device selection (Settings combos removed), and window capture
-  fixed for odd sizes/resizes (13/13 smoke tests)
+  (record vs stream), per-source device selection (Settings combos removed), window capture
+  fixed for odd sizes/resizes, and the popup/timer/browser-overlay fixes — released in v0.9.1
 - Next: on-hardware validation on the RTX 3080 rig
 
 ## The UI (Ulticast-ui.exe)

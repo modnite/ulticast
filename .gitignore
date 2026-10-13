@@ -28,3 +28,6 @@ test/Replay*.mkv
 
 # Local installer output (CI builds this)
 installer/Output/
+
+# UI automation screenshots (uploaded as a CI artifact)
+test/ui/

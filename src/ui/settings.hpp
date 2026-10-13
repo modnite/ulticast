@@ -35,9 +35,17 @@ struct UiSettings {
     bool recordCbr = false;       // record with CBR bitrate instead of CQ
     uint32_t recordBitrate = 12000;
     int bframes = 0;              // 0..4
-    bool lookahead = false;
-    bool multipass = false;
+    bool lookahead = false;       // recording encoder
+    bool multipass = false;       // recording encoder
+    std::string container = "mkv";  // mkv | mp4
+    int audioTracks = 1;            // 1 = mix, 2 = mix + mic-only track (file)
     int preset = 5;
+
+    // stream encoder (independent from the recording encoder)
+    int streamPreset = 5;
+    int streamBframes = 0;
+    bool streamLookahead = false;
+    bool streamMultipass = false;
 
     bool desktopAudio = true;
     bool mic = false;
@@ -86,6 +94,7 @@ struct UiSettings {
 
     bool idlePreview = true;    // capture-only preview while not recording
     bool closeToTray = false;   // X keeps running in the tray instead of exiting
+    bool sceneFade = true;      // crossfade when switching scenes
     int accent = 0;             // index into the accent table (Violet default)
     bool light = false;         // light theme instead of dark
 

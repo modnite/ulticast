@@ -104,6 +104,10 @@ Please attach `diagnostics-*.txt` and the newest log to
   record/play/stop glyphs — built and tested locally (12/12 smoke tests)
 - **Stage 12** Twitch OAuth device-code login (connect once, stream key stays current),
   DirectShow camera fallback, mic monitoring, audio device auto-recovery — released in v0.9.0
+- **Stage 13** (unreleased): clip-hotkey picker (F6–F12/Off), MKV/MP4 container choice, separate
+  mic track, source z-order chevrons, 250 ms scene crossfade, per-output encoder settings
+  (record vs stream), per-source device selection (Settings combos removed), and window capture
+  fixed for odd sizes/resizes (13/13 smoke tests)
 - Next: on-hardware validation on the RTX 3080 rig
 
 ## The UI (Ulticast-ui.exe)
@@ -114,9 +118,9 @@ together (the same separation ShadowPlay/OBS users expect).
 
 | Surface | Contents |
 |---|---|
-| **Record** | scenes + sources rail · live preview (stats overlaid) · **RECORDING** (path, container codec), **CLIPS** (replay toggle, buffer length, F9), **ENCODING** (CQ or CBR, preset, B-frames) · transport: **Start/Stop Recording**, Pause, Snap Clip, Open Folder |
-| **Stream** | scenes + sources rail · live preview · **PLATFORM** (Twitch / YouTube / Facebook / custom, stream key or RTMP URL, reconnect attempts) · **STREAM QUALITY** (bitrate, H.264/HEVC, preset) · transport: **Go Live / End Stream**, Pause, Snap Clip |
-| **Settings** | capture defaults (monitor, window, backend, fps, **GPU**), camera & audio defaults (devices, mic/desktop gain, chroma key), **audio filters** (noise gate, compressor with -1 dB safety clip), **appearance** (8 accents + light/dark), browser overlay URL, advanced encoder (lookahead, two-pass), behavior (idle preview, close to tray), troubleshooting, about |
+| **Record** | scenes + sources rail · live preview (stats overlaid) · **RECORDING** (path, codec, **container MKV/MP4**, **separate mic track**), **CLIPS** (replay toggle, buffer length, **clip hotkey picker F6–F12/Off**), **ENCODING** (CQ or CBR, preset, B-frames, lookahead, two-pass) · transport: **Start/Stop Recording**, Pause, Snap Clip, Open Folder |
+| **Stream** | scenes + sources rail · live preview · **PLATFORM** (Twitch / YouTube / Facebook / custom, stream key or RTMP URL, reconnect attempts, bitrate, H.264/HEVC) · **STREAM ENCODER** (own preset, B-frames, lookahead, two-pass — independent from recording) · **TWITCH ACCOUNT** (Connect once, key stays current) · transport: **Go Live / End Stream**, Pause, Snap Clip |
+| **Settings** | capture defaults (monitor, window, backend, fps, **GPU**), camera & audio (gains, chroma key; **devices are picked per source**), **audio filters** (noise gate, compressor, mic monitoring), **appearance** (8 accents + light/dark), browser overlay URL, behavior (idle preview, close to tray, **scene fade**), troubleshooting, about |
 
 **Sources** (per scene, OBS-style — add with **+ Add**, click a row to configure it):
 
@@ -142,10 +146,19 @@ together (the same separation ShadowPlay/OBS users expect).
   light and dark variants; everything (buttons, switches, sliders, caption bar) follows the accent.
 - **Layout**: no dead space — the rail's leftover room holds the activity log, mode cards fill their
   rows, and the Settings columns are balanced top to bottom.
-- **Scenes**: each scene owns its source list; switching applies live while recording.
+- **Scenes**: each scene owns its source list; switching applies live while recording and
+  **crossfades** the outgoing picture over the new one (250 ms, toggle in Settings → Behavior).
+- **Source order**: the ▲▼ chevrons on a source row move it up/down in the layer stack (capture
+  sources stay pinned so the primary capture never changes under a running session).
+- **Window capture** handles odd-sized windows and mid-session resizes (the canvas rounds to even,
+  the frame is drawn scaled/letterboxed into it).
+- **Per-output encoders**: recording and streaming each have their own preset, B-frames, lookahead
+  and two-pass settings; the container is MKV (crash-safe) or MP4, and the mic can be written to a
+  separate track for editing.
 - **Idle preview**: while not producing output, Ulticast composites the scene into the preview only —
   the camera opens only when recording, streaming or the replay buffer is armed.
-- **Replay buffer**: toggle it in Record > CLIPS; Snap Clip (F9) saves the last moments.
+- **Replay buffer**: toggle it in Record > CLIPS; Snap Clip saves the last moments (hotkey picker:
+  F6–F12 or Off).
 - **No implicit hooks**: WGC is the default; DXGI duplication is an explicit per-source choice.
 - **Dropped-frame + uptime indicators**, live activity strip, tray menu with the same actions.
 - **Settings** persist to `%APPDATA%\Ulticast\settings.ini`; the stream key is stored
@@ -233,16 +246,16 @@ Scopes requested: `channel:read:stream_key` only.
 
 ## Known limitations
 
-1. Window capture returns black in the test VM (WGC); monitor capture and the compositor are fine.
-   DXGI duplication on this VM delivers black until the desktop first updates, then real content.
-3. Frame-counted CFR: capture slightly above 60 fps can stretch video media ~1% vs wall time.
-4. Pause applies to recordings; the final AAC block (~21 ms) is not flushed at stop.
-5. Browser overlays spin up a full Chromium (helper processes, ~300 MB runtime); the first
+1. Window capture of Ulticast's *own* window returns black (WGC cannot capture this app's DXGI
+   swapchain); every other window — games, browsers, Notepad — captures fine, including odd sizes.
+2. Frame-counted CFR: capture slightly above 60 fps can stretch video media ~1% vs wall time.
+3. Pause applies to recordings; the final AAC block (~21 ms) is not flushed at stop.
+4. Browser overlays spin up a full Chromium (helper processes, ~300 MB runtime); the first
    paint takes a second or two after a session starts.
-6. Cameras are exclusive: while recording, the selected camera belongs to Ulticast. The idle
+5. Cameras are exclusive: while recording, the selected camera belongs to Ulticast. The idle
    preview never opens the camera, and Stop releases it immediately.
-7. Virtual cameras that only register with DirectShow (some NVIDIA Broadcast builds) may not show
-   up in the webcam list; check with the Windows Camera app — if it appears there, Ulticast sees it.
+6. Virtual cameras that only register with DirectShow are now listed and captured through a
+   DirectShow fallback; if one still refuses, run `--diagnostics` and report it.
 
 ## Roadmap
 

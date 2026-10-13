@@ -253,6 +253,7 @@ void Session::SetSources(std::vector<SessionSource> sources, std::string webcamP
     std::lock_guard<std::mutex> lk(sourcesMu_);
     liveSources_ = std::move(sources);
     liveWebcamPos_ = std::move(webcamPos);
+    transitionPending_ = true;  // snapshot the outgoing frame on the capture thread
 }
 
 // ------------------------------------------------------------ runtime outputs
@@ -429,6 +430,8 @@ bool Session::BeginRecording(const std::string& path) {
     rc.cqp = cfg_.cqp;
     rc.bitrateKbps = cfg_.recordBitrate;
     rc.maxBitrateKbps = cfg_.recordBitrate;
+    rc.lookahead = cfg_.recordLookahead;
+    rc.multipass = cfg_.recordMultipass;
 
     std::string e;
     if (!recEnc_.Init(d3d_.device.Get(), rc, &e)) {
@@ -487,6 +490,10 @@ bool Session::BeginStreaming(const std::string& url, uint32_t bitrateKbps) {
     sc.rateMode = EncoderConfig::RateMode::CBR;
     sc.bitrateKbps = bitrateKbps ? bitrateKbps : cfg_.streamBitrate;
     sc.maxBitrateKbps = sc.bitrateKbps;
+    sc.preset = cfg_.streamPreset;
+    sc.bframes = cfg_.streamBframes;
+    sc.lookahead = cfg_.streamLookahead;
+    sc.multipass = cfg_.streamMultipass;
 
     std::string e;
     if (!strEnc_.Init(d3d_.device.Get(), sc, &e)) {
@@ -654,18 +661,23 @@ EncoderConfig Session::MakeEncoderConfig(uint32_t w, uint32_t h) const {
     base.fps = cfg_.fps;
     base.preset = cfg_.preset;
     base.bframes = cfg_.bframes;
-    base.lookahead = cfg_.lookahead;
-    base.multipass = cfg_.multipass;
     return base;
 }
 
 bool Session::InitPipeline(uint32_t w, uint32_t h, std::string* err) {
-    width_ = w;
-    height_ = h;
+    // Encoders need even dimensions (4:2:0); window sizes can be odd, so the
+    // canvas is rounded down and odd frames are drawn scaled into it.
     if ((w & 1) || (h & 1)) {
-        *err = "capture size is not even";
+        Log("[capture] rounding %ux%u canvas to even", w, h);
+        w &= ~1u;
+        h &= ~1u;
+    }
+    if (w < 16 || h < 16) {
+        *err = "capture size too small";
         return false;
     }
+    width_ = w;
+    height_ = h;
 
     EncoderConfig base = MakeEncoderConfig(w, h);
 
@@ -678,6 +690,8 @@ bool Session::InitPipeline(uint32_t w, uint32_t h, std::string* err) {
         rc.cqp = cfg_.cqp;
         rc.bitrateKbps = cfg_.recordBitrate;
         rc.maxBitrateKbps = cfg_.recordBitrate;
+        rc.lookahead = cfg_.recordLookahead;
+        rc.multipass = cfg_.recordMultipass;
         if (!recEnc_.Init(d3d_.device.Get(), rc, &e)) {
             *err = "record encoder: " + e;
             return false;
@@ -689,6 +703,10 @@ bool Session::InitPipeline(uint32_t w, uint32_t h, std::string* err) {
         sc.rateMode = EncoderConfig::RateMode::CBR;  // streaming wants a predictable bitrate
         sc.bitrateKbps = cfg_.streamBitrate;
         sc.maxBitrateKbps = cfg_.streamBitrate;
+        sc.preset = cfg_.streamPreset;
+        sc.bframes = cfg_.streamBframes;
+        sc.lookahead = cfg_.streamLookahead;
+        sc.multipass = cfg_.streamMultipass;
         if (!strEnc_.Init(d3d_.device.Get(), sc, &e)) {
             *err = "stream encoder: " + e;
             return false;
@@ -840,17 +858,50 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
         lastFrameTime_ = std::chrono::steady_clock::now();
     }
     if (fw != width_.load() || fh != height_.load()) {
-        if (inited_.load()) {
-            char msg[160];
-            sprintf_s(msg, "capture size changed (%ux%u -> %ux%u); stop and restart the session",
-                      width_.load(), height_.load(), fw, fh);
-            Fail(msg);
+        // A window can be resized (or be odd-sized) while the canvas stays put:
+        // draw the frame scaled instead of failing the session.
+        if (!inited_.load()) {
+            Fail("capture changed size before the pipeline was ready");
+            return;
         }
-        return;
     }
 
     // Outputs can be switched on/off at any time; do it between frames.
     ApplyOutputCommands();
+
+    // Scene crossfade: snapshot the outgoing composite the first frame after a
+    // scene switch, then blend it out over ~250 ms (the compositor's per-layer
+    // opacity does the blend).
+    float fadeAlpha = 0.f;
+    if (transitionPending_.exchange(false) && cfg_.sceneFade) {
+        if (!transitionTex_) {
+            D3D11_TEXTURE2D_DESC td{};
+            tex_->GetDesc(&td);
+            td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            td.MiscFlags = 0;
+            d3d_.device->CreateTexture2D(&td, nullptr, transitionTex_.GetAddressOf());
+        }
+        if (transitionTex_) {
+            // Snapshot the previous *composited* frame (tex_ still holds it) so
+            // the fade blends the outgoing picture, overlays included.
+            d3d_.context->CopyResource(transitionTex_.Get(), tex_.Get());
+            if (!transitionSrv_)
+                transitionSrv_ = Compositor::CreateSrv(d3d_.device.Get(), transitionTex_.Get());
+            transitionStart_ = std::chrono::steady_clock::now();
+            Log("[scene] crossfade 250 ms");
+        }
+    }
+    if (transitionTex_ && cfg_.sceneFade) {
+        const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                                      transitionStart_)
+                             .count();
+        constexpr double kFadeSeconds = 0.25;
+        if (t < kFadeSeconds) fadeAlpha = (float)(1.0 - t / kFadeSeconds);
+        else {
+            transitionTex_.Reset();
+            transitionSrv_.Reset();
+        }
+    }
 
     // Pace to the configured frame rate: WGC can deliver at the display rate,
     // which would otherwise stretch the frame-counted media clock.
@@ -863,7 +914,22 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
     }
 
     // ---- scene ----
-    d3d_.context->CopyResource(sceneTex_.Get(), src);
+    const uint32_t canvasU32W = width_.load();
+    const uint32_t canvasU32H = height_.load();
+    // Primary capture -> canvas: a straight copy when the sizes match, otherwise
+    // draw the frame scaled (letterboxed) so odd window sizes and mid-session
+    // window resizes still work.
+    scaledFrameSrv_.Reset();
+    if (fw == canvasU32W && fh == canvasU32H) {
+        d3d_.context->CopyResource(sceneTex_.Get(), src);
+    } else {
+        scaledFrameSrv_ = Compositor::CreateSrv(d3d_.device.Get(), src);
+        if (scaledFrameSrv_ && !sizeScaled_) {
+            sizeScaled_ = true;
+            Log("[capture] scaling %ux%u into the %ux%u canvas", fw, fh, canvasU32W, canvasU32H);
+        }
+    }
+
     LayerDraw layers[8];
     int layerCount = 0;
     auto applyKey = [&](LayerDraw& l) {
@@ -893,9 +959,29 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
         if (s.type == SessionSourceType::Capture) {
             const int ci = captureIdx++;
             if (ci == 0) {
-                const float w = (float)(s.w > 0 ? s.w : (int)canvasW);
-                const float h = (float)(s.h > 0 ? s.h : (int)canvasH);
-                pushLayer(sceneSrv_.Get(), (float)s.x, (float)s.y, w, h);
+                ID3D11ShaderResourceView* base =
+                    scaledFrameSrv_ ? scaledFrameSrv_.Get() : sceneSrv_.Get();
+                float x = 0.f, y = 0.f, w = (float)canvasW, h = (float)canvasH;
+                if (scaledFrameSrv_) {
+                    // letterbox: keep the captured frame's aspect ratio
+                    const float fa = (float)fw / (float)fh;
+                    const float ca = (float)canvasW / (float)canvasH;
+                    if (fa > ca) {
+                        w = (float)canvasW;
+                        h = (float)canvasW / fa;
+                        y = ((float)canvasH - h) / 2.f;
+                    } else {
+                        h = (float)canvasH;
+                        w = (float)canvasH * fa;
+                        x = ((float)canvasW - w) / 2.f;
+                    }
+                } else if (s.w > 0) {
+                    x = (float)s.x;
+                    y = (float)s.y;
+                    w = (float)s.w;
+                    h = (float)s.h;
+                }
+                pushLayer(base, x, y, w, h);
                 if (cfg_.chroma && cfg_.chromaLayer == 1) applyKey(layers[layerCount - 1]);
             } else if ((size_t)(ci - 1) < extraCaps_.size()) {
                 ExtraCapture* e = extraCaps_[ci - 1].get();
@@ -1093,6 +1179,15 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
             }
         } else {
             cursorHandle_ = nullptr;  // cursor hidden: re-fetch when it returns
+        }
+    }
+
+    if (fadeAlpha > 0.001f && transitionSrv_) {
+        // Draw the outgoing frame on top of the new scene, fading out.
+        if (layerCount < 8) {
+            layers[layerCount] = {transitionSrv_.Get(), 0.f, 0.f, (float)canvasW,
+                                  (float)canvasH, fadeAlpha};
+            layerCount++;
         }
     }
 

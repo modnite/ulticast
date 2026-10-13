@@ -143,7 +143,34 @@ Check 'monitor mic: output endpoint initializes' ($monOut -match '\[audio\] moni
 $frames = [int](ProbeInfo "$t\ds.mkv" 'stream=nb_read_frames' | Select-Object -First 1)
 Check 'dshow camera: DirectShow fallback captures frames' ($frames -ge 60) "frames=$frames"
 
-# --------------------------------------------------------------- 10. cursor
+# ------------------------------------------------------- 10. window capture
+# Window capture must work for odd-sized windows too (the canvas rounds to even
+# and the frame is drawn scaled). Notepad is a plain GDI window with an odd
+# client size, so it exercises exactly that path.
+$np = Start-Process notepad -PassThru
+Start-Sleep -Seconds 3
+& $exe --backend wgc --window "Notepad" --seconds 3 --out "$t\wincap.mkv" 2>&1 | Out-Null
+if (ExtractFrame "$t\wincap.mkv" 2 "$t\wincap.png") {
+    $bmp = New-Object System.Drawing.Bitmap "$t\wincap.png"
+    $sum = 0.0
+    $n = 0
+    for ($y = 0; $y -lt $bmp.Height; $y += 12) {
+        for ($x = 0; $x -lt $bmp.Width; $x += 12) {
+            $p = $bmp.GetPixel($x, $y)
+            $sum += ($p.R + $p.G + $p.B) / 3.0
+            $n++
+        }
+    }
+    $luma = if ($n -gt 0) { $sum / $n } else { 0 }
+    $bmp.Dispose()
+    Check 'window capture: real window content (odd size, scaled canvas)' ($luma -gt 60) `
+          ("luma=" + [math]::Round($luma, 1))
+} else {
+    Check 'window capture: real window content (odd size, scaled canvas)' $false 'frame extraction failed'
+}
+if ($np -and -not $np.HasExited) { Stop-Process -Id $np.Id -Force }
+
+# --------------------------------------------------------------- 11. cursor
 # Park the cursor, then capture the same desktop twice *concurrently* (one run
 # with cursor compositing, one without). Because both captures happen at the
 # same wall-clock time, the desktop content is identical and the only pixel

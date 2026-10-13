@@ -493,7 +493,12 @@ int wmain(int argc, wchar_t** argv) {
     cfg.recordBitrate = o.bitrate ? o.bitrate : 12000;
     cfg.preset = o.preset;
     cfg.bframes = o.bframes;
-    cfg.lookahead = o.lookahead;
+    cfg.recordLookahead = o.lookahead;
+    cfg.recordMultipass = false;
+    cfg.streamPreset = o.preset;
+    cfg.streamBframes = o.bframes;
+    cfg.streamLookahead = o.lookahead;
+    cfg.streamMultipass = false;
     cfg.noAudio = o.noAudio;
     cfg.audio.desktop = o.desktopAudio;
     cfg.audio.mic = o.mic;

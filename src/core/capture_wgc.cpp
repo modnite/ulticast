@@ -120,6 +120,12 @@ bool WgcCapture::StartWindow(const std::wstring& titleSubstr, ID3D11Device* devi
         *err = "no visible window matched that title";
         return false;
     }
+    if (IsIconic(target)) {
+        // Windows Graphics Capture cannot capture a minimized window (frames
+        // stay black), so say so instead of producing a black layer.
+        *err = "that window is minimized — restore it first";
+        return false;
+    }
     try {
         auto interop =
             winrt::get_activation_factory<wgc::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();

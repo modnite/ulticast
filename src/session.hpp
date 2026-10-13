@@ -69,8 +69,14 @@ struct SessionConfig {
     uint32_t recordBitrate = 12000; // kbps when recordCbr
     int preset = 5;
     int bframes = 0;
-    bool lookahead = false;
-    bool multipass = false;
+    bool recordLookahead = false;
+    bool recordMultipass = false;
+
+    // stream encoder (separate settings so each output is tuned on its own)
+    int streamPreset = 5;
+    int streamBframes = 0;
+    bool streamLookahead = false;
+    bool streamMultipass = false;
 
     // audio
     bool noAudio = false;
@@ -100,6 +106,7 @@ struct SessionConfig {
 
     bool showCursor = true;      // DXGI duplication cursor compositing
     bool forceDshow = false;     // debug/testing: try DirectShow before Media Foundation
+    bool sceneFade = true;       // crossfade ~250 ms when the scene changes
 
     // Scene: ordered sources. Empty -> a default scene is built from the
     // webcam/browser flags above (keeps the CLI behaviour).
@@ -238,6 +245,13 @@ private:
     std::chrono::steady_clock::time_point t0_{};
     std::chrono::steady_clock::time_point lastFrameTime_{};
     std::chrono::steady_clock::time_point recStart_{}, strStart_{};
+
+    // Scene crossfade: SetSources() asks for a snapshot of the outgoing frame
+    // (the D3D context is capture-thread only) and OnFrame blends it out.
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> transitionTex_;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> transitionSrv_;
+    std::atomic<bool> transitionPending_{false};
+    std::chrono::steady_clock::time_point transitionStart_{};
     std::thread supervisor_;
     mutable std::mutex previewMu_;
 
@@ -307,6 +321,10 @@ private:
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv_;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> sceneSrv_;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> sceneTex_;
+    // Set when the captured frame's size differs from the canvas (odd window
+    // size or a window that was resized): the frame is drawn scaled.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scaledFrameSrv_;
+    bool sizeScaled_ = false;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> previewTex_;
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> browserTex_;

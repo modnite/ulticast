@@ -220,6 +220,13 @@ bool LoadUiSettings(UiSettings* s) {
         else if (key == "bframes") s->bframes = atoi(val.c_str());
         else if (key == "lookahead") s->lookahead = (val == "1");
         else if (key == "multipass") s->multipass = (val == "1");
+        else if (key == "container") s->container = val;
+        else if (key == "audioTracks") s->audioTracks = atoi(val.c_str());
+        else if (key == "streamPreset") s->streamPreset = atoi(val.c_str());
+        else if (key == "streamBframes") s->streamBframes = atoi(val.c_str());
+        else if (key == "streamLookahead") s->streamLookahead = (val == "1");
+        else if (key == "streamMultipass") s->streamMultipass = (val == "1");
+        else if (key == "sceneFade") s->sceneFade = (val == "1");
         else if (key == "preset") s->preset = atoi(val.c_str());
         else if (key == "desktopAudio") s->desktopAudio = (val == "1");
         else if (key == "mic") s->mic = (val == "1");
@@ -335,6 +342,13 @@ bool SaveUiSettings(const UiSettings& s) {
     f << "bframes=" << s.bframes << "\n";
     f << "lookahead=" << (s.lookahead ? 1 : 0) << "\n";
     f << "multipass=" << (s.multipass ? 1 : 0) << "\n";
+    f << "container=" << s.container << "\n";
+    f << "audioTracks=" << s.audioTracks << "\n";
+    f << "streamPreset=" << s.streamPreset << "\n";
+    f << "streamBframes=" << s.streamBframes << "\n";
+    f << "streamLookahead=" << (s.streamLookahead ? 1 : 0) << "\n";
+    f << "streamMultipass=" << (s.streamMultipass ? 1 : 0) << "\n";
+    f << "sceneFade=" << (s.sceneFade ? 1 : 0) << "\n";
     f << "preset=" << s.preset << "\n";
     f << "desktopAudio=" << (s.desktopAudio ? 1 : 0) << "\n";
     f << "mic=" << (s.mic ? 1 : 0) << "\n";

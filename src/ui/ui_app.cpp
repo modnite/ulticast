@@ -230,6 +230,16 @@ enum {
     ID_TWITCH_CONNECT = 5200,
     ID_TWITCH_DISCONNECT,
     ID_FIELD_TWITCHCID,
+    ID_COMBO_CONTAINER,
+    ID_TOGGLE_TRACKS,
+    ID_COMBO_HOTKEY,
+    ID_TOGGLE_FADE,
+    ID_COMBO_STREAMPRESET,
+    ID_SLIDER_STREAMBFRAMES,
+    ID_TOGGLE_STREAMLOOKAHEAD,
+    ID_TOGGLE_STREAMMULTIPASS,
+    ID_SRC_UP_BASE = 4300,    // + source index: move up in the list (z-order)
+    ID_SRC_DOWN_BASE = 4400,  // + source index: move down
 };
 
 enum {
@@ -262,8 +272,16 @@ std::wstring Format(const wchar_t* fmt, ...) {
     return buf;
 }
 
-std::wstring FormatTime(double seconds) {
-    int total = (int)seconds;
+// Swaps a path's extension (the container choice drives it).
+static std::string WithExtension(const std::string& path, const std::string& ext) {
+    const size_t dot = path.find_last_of('.');
+    const size_t slash = path.find_last_of("\\/");
+    if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
+        return path.substr(0, dot + 1) + ext;
+    return path + "." + ext;
+}
+
+std::wstring FormatTime(double seconds) {    int total = (int)seconds;
     int h = total / 3600, m = (total % 3600) / 60, s = total % 60;
     if (h > 0) return Format(L"%d:%02d:%02d", h, m, s);
     return Format(L"%02d:%02d", m, s);
@@ -377,7 +395,7 @@ private:
     void ApplyCaptionTheme();
     void ApplyThemeNow();  // palette + gradient + caption + repaint
     void Card(float x, float y, float w, float h, const std::wstring& title);
-    D2D1_RECT_F PreviewRect() const { return S(320, 64, 720, 316); }
+    D2D1_RECT_F PreviewRect() const { return S(320, 64, 720, 286); }
     // preview <-> canvas mapping for the draggable webcam PiP
     D2D1_RECT_F PreviewCanvasToDevice(const D2D1_RECT_F& pr, float cx, float cy, float cw,
                                       float ch) const;
@@ -480,7 +498,9 @@ private:
 
     // data
     std::vector<std::wstring> monitors_, windows_, webcams_, mics_, backends_, fpss_, codecs_,
-        presets_, positions_, platforms_, gpus_, rates_, desktops_, streamCodecs_;
+        presets_, positions_, platforms_, gpus_, rates_, desktops_, streamCodecs_, containers_,
+        hotkeys_;
+    std::vector<int> hotkeyValues_;
     std::vector<std::string> backendKeys_, platformKeys_, posKeys_;
     std::vector<int> gpuValues_;
     std::vector<bool> gpuNvenc_;
@@ -489,7 +509,7 @@ private:
     std::vector<bool> codecHevc_;
     int selMonitor_ = 0, selWindow_ = 0, selWebcam_ = 0, selMic_ = 0, selBackend_ = 0, selFps_ = 1,
         selCodec_ = 0, selPreset_ = 4, selPos_ = 3, selPlatform_ = 0, selGpu_ = 0, selRate_ = 0,
-        selDesk_ = 0, selStreamCodec_ = 0;
+        selDesk_ = 0, selStreamCodec_ = 0, selContainer_ = 0, selHotkey_ = 0, selStreamPreset_ = 4;
     std::wstring bitrateText_, streamBitrateText_;
     int micGainPct_ = 100, deskGainPct_ = 100;
 
@@ -508,6 +528,8 @@ private:
     int lastCompDb_ = -18;
     int lastCompRatio_ = 30;
     bool lastMonitor_ = false;
+    bool separateTracks_ = false;
+    void MoveSource(int index, int delta);
     std::wstring keyText_, urlText_, chromaText_, browserText_;
 
     // pages + scenes
@@ -1441,10 +1463,25 @@ void UiApp::DrawSceneRail() {
         dc_->DrawRoundedRectangle(rr, Br(kBorder), Px(1));
         Text(SourceTag(sc.sources[i]), fmtPill_, S(x + 8, y, 40, 32), kAccent,
              DWRITE_TEXT_ALIGNMENT_CENTER);
-        dc_->PushAxisAlignedClip(S(x + 52, y, w - 52 - 98, 32), D2D1_ANTIALIAS_MODE_ALIASED);
-        Text(SourceLabel(sc.sources[i]), fmtSmall_, S(x + 52, y, w - 52 - 98, 32),
+        dc_->PushAxisAlignedClip(S(x + 52, y, w - 52 - 120, 32), D2D1_ANTIALIAS_MODE_ALIASED);
+        Text(SourceLabel(sc.sources[i]), fmtSmall_, S(x + 52, y, w - 52 - 120, 32),
              sc.sources[i].enabled ? kText : WithAlpha(kTextDim, 0.6f));
         dc_->PopAxisAlignedClip();
+
+        // z-order: chevrons move the source up/down (captures stay pinned so the
+        // primary capture never changes under a running session).
+        const bool isCapture = sc.sources[i].type == SessionSourceType::Capture;
+        D2D1_RECT_F upR = S(x + w - 94, y + 5, 18, 22);
+        D2D1_RECT_F dnR = S(x + w - 74, y + 5, 18, 22);
+        const bool canUp = !isCapture && i > 0;
+        const bool canDown = !isCapture && i + 1 < sc.sources.size();
+        if (canUp) hits_.push_back({ID_SRC_UP_BASE + (int)i, upR, true});
+        if (canDown) hits_.push_back({ID_SRC_DOWN_BASE + (int)i, dnR, true});
+        Text(L"\x25B2", fmtSmall_, upR, canUp ? kTextDim : WithAlpha(kTextDim, 0.25f),
+             DWRITE_TEXT_ALIGNMENT_CENTER);
+        Text(L"\x25BC", fmtSmall_, dnR, canDown ? kTextDim : WithAlpha(kTextDim, 0.25f),
+             DWRITE_TEXT_ALIGNMENT_CENTER);
+
         Toggle(ID_SRC_TOGGLE_BASE + (int)i, S(x + w - 54, y, 50, 32), L"",
                &scenes_[activeScene_].sources[i].enabled, true, /*pinRight=*/true);
         y += 36;
@@ -1861,6 +1898,27 @@ void UiApp::HandleTwitchStateChange() {
     }
 }
 
+void UiApp::MoveSource(int index, int delta) {
+    if (scenes_.empty()) return;
+    UiScene& sc = scenes_[activeScene_];
+    const int j = index + delta;
+    if (index < 0 || index >= (int)sc.sources.size() || j < 0 || j >= (int)sc.sources.size())
+        return;
+    if (sc.sources[index].type == SessionSourceType::Capture ||
+        sc.sources[j].type == SessionSourceType::Capture) {
+        statusText_ = L"Capture sources keep their position (remove and re-add to move)";
+        statusError_ = false;
+        return;
+    }
+    std::swap(sc.sources[index], sc.sources[j]);
+    SyncSettingsFromUi();
+    SaveUiSettings(settings_);
+    PushSceneSources();
+    statusText_ = L"Source order updated";
+    statusError_ = false;
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
 void UiApp::DrawActionPopup() {
     if (!openAction_) return;
     if (openAction_ == ID_ADD_SOURCE) {
@@ -1932,39 +1990,56 @@ void UiApp::DrawPreviewStats(const D2D1_RECT_F& r) {
 }
 
 void UiApp::DrawRecordCards() {
-    const float rowH = 40, gap = 8, pad = 10, headH = 18, cw = 212;
-    const float cy = 392;
+    const float rowH = 32, gap = 4, pad = 10, headH = 18, cw = 212;
+    const float cy = 362, ch = pad + headH + 6 * rowH + 5 * gap + pad;
 
-    Card(320, cy, 232, pad + headH + 4 * rowH + 3 * gap + pad, L"RECORDING");
+    Card(320, cy, 232, ch, L"RECORDING");
     float y = cy + pad + headH + 4;
     D2D1_RECT_F pathR = S(320 + pad, y, cw - 92, rowH);
     Panel(pathR, 8, kPanel, true);
     dc_->PushAxisAlignedClip(pathR, D2D1_ANTIALIAS_MODE_ALIASED);
-    Text(ShortPath(settings_.recordPath), fmtSmall_, Inset(pathR, 12, 0), kText);
+    Text(ShortPath(WithExtension(settings_.recordPath, selContainer_ == 1 ? "mp4" : "mkv")),
+         fmtSmall_, Inset(pathR, 12, 0), kText);
     dc_->PopAxisAlignedClip();
     Button(ID_BROWSE, S(320 + pad + cw - 84, y, 84, rowH), L"Browse", BtnStyle::Ghost);
     y += rowH + gap;
     Combo(ID_COMBO_CODEC, S(320 + pad, y, cw, rowH), codecs_, &selCodec_);
     y += rowH + gap;
-    Text(L"Container: MKV (crash-safe)", fmtSmall_, S(320 + pad, y, cw, rowH),
-         WithAlpha(kTextDim, 0.7f));
+    Combo(ID_COMBO_CONTAINER, S(320 + pad, y, cw, rowH), containers_, &selContainer_);
+    y += rowH + gap;
+    Toggle(ID_TOGGLE_TRACKS, S(320 + pad, y, cw, rowH), L"Separate mic track",
+           &separateTracks_);
+    y += rowH + gap;
+    Text(selContainer_ == 1 ? L"MP4 needs a clean stop" : L"MKV survives crashes",
+         fmtSmall_, S(320 + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
     y += rowH + gap;
     Button(ID_OPENFOLDER, S(320 + pad, y, cw, rowH), L"Open Folder", BtnStyle::Ghost);
 
-    Card(564, cy, 232, pad + headH + 4 * rowH + 3 * gap + pad, L"CLIPS");
+    Card(564, cy, 232, ch, L"CLIPS");
     y = cy + pad + headH + 4;
     Toggle(ID_TOGGLE_REPLAY, S(564 + pad, y, cw, rowH), L"Replay", &settings_.replay);
     y += rowH + gap;
     Slider(ID_SLIDER_REPLAY, S(564 + pad, y, cw, rowH), 10, 120, &settings_.replaySeconds,
            L"%ds");
     y += rowH + gap;
-    Text(settings_.replay ? L"F9 saves the last moments" : L"Arm the replay buffer above",
+    Text(L"Clip key", fmtBody_, S(564 + pad, y, 62, rowH), kTextDim);
+    Combo(ID_COMBO_HOTKEY, S(564 + pad + 66, y, cw - 66, rowH), hotkeys_, &selHotkey_);
+    y += rowH + gap;
+    Text(settings_.replay
+             ? Format(L"%s saves the last moments",
+                      hotkeys_[(selHotkey_ >= 0 && selHotkey_ < (int)hotkeys_.size()) ? selHotkey_
+                                                                                      : 3]
+                          .c_str())
+             : L"Arm the replay buffer above",
          fmtSmall_, S(564 + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
     y += rowH + gap;
-    Button(ID_CLIP, S(564 + pad, y, cw, rowH), L"Save Clip (F9)", BtnStyle::Ghost,
+    Button(ID_CLIP, S(564 + pad, y, cw, rowH), L"Save Clip", BtnStyle::Ghost,
            stats_.replayArmed);
+    y += rowH + gap;
+    Text(L"Clips land next to the recording", fmtSmall_, S(564 + pad, y, cw, rowH),
+         WithAlpha(kTextDim, 0.7f));
 
-    Card(808, cy, 232, pad + headH + 4 * rowH + 3 * gap + pad, L"ENCODING");
+    Card(808, cy, 232, ch, L"ENCODING");
     y = cy + pad + headH + 4;
     Combo(ID_COMBO_RATE, S(808 + pad, y, cw, rowH), rates_, &selRate_);
     y += rowH + gap;
@@ -1978,13 +2053,17 @@ void UiApp::DrawRecordCards() {
     y += rowH + gap;
     Slider(ID_SLIDER_BFRAMES, S(808 + pad, y, cw, rowH), 0, 4, &settings_.bframes,
            L"B-frames %d");
+    y += rowH + gap;
+    Toggle(ID_TOGGLE_LOOKAHEAD, S(808 + pad, y, cw, rowH), L"Lookahead", &settings_.lookahead);
+    y += rowH + gap;
+    Toggle(ID_TOGGLE_MULTIPASS, S(808 + pad, y, cw, rowH), L"Two-pass", &settings_.multipass);
 }
 
 void UiApp::DrawStreamCards() {
-    const float rowH = 40, gap = 8, pad = 10, headH = 18, cw = 212;
-    const float cy = 392;
+    const float rowH = 32, gap = 4, pad = 10, headH = 18, cw = 212;
+    const float cy = 362, ch = pad + headH + 6 * rowH + 5 * gap + pad;
 
-    Card(320, cy, 232, pad + headH + 4 * rowH + 3 * gap + pad, L"PLATFORM");
+    Card(320, cy, 232, ch, L"PLATFORM");
     float y = cy + pad + headH + 4;
     Combo(ID_COMBO_PLATFORM, S(320 + pad, y, cw, rowH), platforms_, &selPlatform_);
     y += rowH + gap;
@@ -1996,23 +2075,35 @@ void UiApp::DrawStreamCards() {
     Slider(ID_SLIDER_RECONNECT, S(320 + pad, y, cw, rowH), 1, 10, &settings_.streamReconnect,
            L"%dx");
     y += rowH + gap;
+    Field(ID_FIELD_STREAMBITRATE, S(320 + pad, y, cw, rowH), &streamBitrateText_, false,
+          L"Bitrate kbps (CBR)");
+    y += rowH + gap;
+    Combo(ID_COMBO_STREAMCODEC, S(320 + pad, y, cw, rowH), streamCodecs_, &selStreamCodec_);
+    y += rowH + gap;
     Text(L"Press Go Live to start", fmtSmall_, S(320 + pad, y, cw, rowH),
          WithAlpha(kTextDim, 0.7f));
 
-    Card(564, cy, 232, pad + headH + 4 * rowH + 3 * gap + pad, L"STREAM QUALITY");
+    Card(564, cy, 232, ch, L"STREAM ENCODER");
     y = cy + pad + headH + 4;
-    Field(ID_FIELD_STREAMBITRATE, S(564 + pad, y, cw, rowH), &streamBitrateText_, false,
-          L"Bitrate kbps (CBR)");
+    Combo(ID_COMBO_STREAMPRESET, S(564 + pad, y, cw, rowH), presets_, &selStreamPreset_);
     y += rowH + gap;
-    Combo(ID_COMBO_STREAMCODEC, S(564 + pad, y, cw, rowH), streamCodecs_, &selStreamCodec_);
+    Slider(ID_SLIDER_STREAMBFRAMES, S(564 + pad, y, cw, rowH), 0, 4, &settings_.streamBframes,
+           L"B-frames %d");
     y += rowH + gap;
-    Combo(ID_COMBO_PRESET, S(564 + pad, y, cw, rowH), presets_, &selPreset_);
+    Toggle(ID_TOGGLE_STREAMLOOKAHEAD, S(564 + pad, y, cw, rowH), L"Lookahead",
+           &settings_.streamLookahead);
     y += rowH + gap;
-    Text(L"CBR — match your upload", fmtSmall_, S(564 + pad, y, cw, rowH),
+    Toggle(ID_TOGGLE_STREAMMULTIPASS, S(564 + pad, y, cw, rowH), L"Two-pass",
+           &settings_.streamMultipass);
+    y += rowH + gap;
+    Text(L"CBR at the bitrate on the left", fmtSmall_, S(564 + pad, y, cw, rowH),
+         WithAlpha(kTextDim, 0.7f));
+    y += rowH + gap;
+    Text(L"Two-pass: slower, better quality", fmtSmall_, S(564 + pad, y, cw, rowH),
          WithAlpha(kTextDim, 0.7f));
 
     // TWITCH ACCOUNT: connect once, then the stream key keeps itself current.
-    Card(808, cy, 232, pad + headH + 4 * rowH + 3 * gap + pad, L"TWITCH ACCOUNT");
+    Card(808, cy, 232, ch, L"TWITCH ACCOUNT");
     y = cy + pad + headH + 4;
     {
         std::lock_guard<std::mutex> lk(twitchMu_);
@@ -2037,6 +2128,12 @@ void UiApp::DrawStreamCards() {
         y += rowH + gap;
         Field(ID_FIELD_TWITCHCID, S(808 + pad, y, cw, rowH), &twitchClientIdText_, false,
               L"Client ID (optional)");
+        y += rowH + gap;
+        Text(L"Connect once — the key stays current", fmtSmall_, S(808 + pad, y, cw, rowH),
+             WithAlpha(kTextDim, 0.7f));
+        y += rowH + gap;
+        Text(L"Key stored DPAPI-encrypted", fmtSmall_, S(808 + pad, y, cw, rowH),
+             WithAlpha(kTextDim, 0.7f));
     }
 }
 
@@ -2059,24 +2156,21 @@ void UiApp::DrawSettingsPage() {
         Combo(ID_COMBO_GPU, S(x + pad, y, cw, rowH), gpus_, &selGpu_);
         cy += pad + headH + 3 * rowH + 2 * rowGap + pad + cardGap;
 
-        Card(x, cy, w, pad + headH + 5 * rowH + 4 * rowGap + pad, L"CAMERA & AUDIO DEFAULTS");
+        Card(x, cy, w, pad + headH + 4 * rowH + 3 * rowGap + pad, L"CAMERA & AUDIO");
         y = cy + pad + headH + 4;
-        Combo(ID_COMBO_WEBCAMDEV, S(x + pad, y, cw, rowH), webcams_, &selWebcam_);
-        y += rowH + rowGap;
-        Toggle(ID_TOGGLE_DESKTOP, S(x + pad, y, 130, rowH), L"Desktop", &settings_.desktopAudio);
-        Combo(ID_COMBO_DESKDEV, S(x + pad + 146, y, cw - 146, rowH), desktops_, &selDesk_,
-              settings_.desktopAudio);
-        y += rowH + rowGap;
-        Toggle(ID_TOGGLE_MIC, S(x + pad, y, 110, rowH), L"Mic", &settings_.mic);
-        Combo(ID_COMBO_MICDEV, S(x + pad + 126, y, cw - 126, rowH), mics_, &selMic_, settings_.mic);
-        y += rowH + rowGap;
         Slider(ID_SLIDER_MICGAIN, S(x + pad, y, 226, rowH), 0, 200, &micGainPct_, L"Mic %d%%");
         Slider(ID_SLIDER_DESKGAIN, S(x + pad + 244, y, 226, rowH), 0, 200, &deskGainPct_,
                L"Desk %d%%");
         y += rowH + rowGap;
         Toggle(ID_TOGGLE_CHROMA, S(x + pad, y, 130, rowH), L"Chroma Key", &settings_.chroma);
         Field(ID_FIELD_CHROMA, S(x + pad + 146, y, 160, rowH), &chromaText_, false, L"00FF00");
-        cy += pad + headH + 5 * rowH + 4 * rowGap + pad + cardGap;
+        y += rowH + rowGap;
+        Text(L"Devices are chosen per source — click a source row on the Record/Stream page",
+             fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+        y += rowH + rowGap;
+        Text(L"Mic gate, compressor and monitoring live in Audio Filters", fmtSmall_,
+             S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+        cy += pad + headH + 4 * rowH + 3 * rowGap + pad + cardGap;
 
         // APPEARANCE: accent swatches + light/dark
         Card(x, cy, w, pad + headH + rowH + pad, L"APPEARANCE");
@@ -2139,20 +2233,20 @@ void UiApp::DrawSettingsPage() {
              WithAlpha(kTextDim, 0.7f));
         cy += pad + headH + 4 * rowH + 3 * rowGap + pad + cardGap;
 
-        Card(x, cy, w, pad + headH + rowH + pad, L"ADVANCED ENCODER");
-        y = cy + pad + headH + 4;
-        Toggle(ID_TOGGLE_LOOKAHEAD, S(x + pad, y, 221, rowH), L"Lookahead", &settings_.lookahead);
-        Toggle(ID_TOGGLE_MULTIPASS, S(x + pad + 249, y, 221, rowH), L"Two-pass",
-               &settings_.multipass);
-        cy += pad + headH + rowH + pad + cardGap;
-
-        Card(x, cy, w, pad + headH + rowH + pad, L"BEHAVIOR");
+        Card(x, cy, w, pad + headH + 3 * rowH + 2 * rowGap + pad, L"BEHAVIOR");
         y = cy + pad + headH + 4;
         Toggle(ID_TOGGLE_IDLEPREVIEW, S(x + pad, y, 221, rowH), L"Idle preview",
                &settings_.idlePreview);
         Toggle(ID_TOGGLE_TRAYCLOSE, S(x + pad + 249, y, 221, rowH), L"Close to tray",
                &settings_.closeToTray);
-        cy += pad + headH + rowH + pad + cardGap;
+        y += rowH + rowGap;
+        Toggle(ID_TOGGLE_FADE, S(x + pad, y, 221, rowH), L"Scene fade", &settings_.sceneFade);
+        Text(L"250 ms crossfade when switching scenes", fmtSmall_,
+             S(x + pad + 249, y, 221, rowH), WithAlpha(kTextDim, 0.7f));
+        y += rowH + rowGap;
+        Text(L"The camera opens only while recording, streaming or replay is armed", fmtSmall_,
+             S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+        cy += pad + headH + 3 * rowH + 2 * rowGap + pad + cardGap;
 
         Card(x, cy, w, pad + headH + rowH + pad, L"TROUBLESHOOTING");
         y = cy + pad + headH + 4;
@@ -2396,6 +2490,9 @@ void UiApp::ReloadDevices() {
     }
     rates_ = {L"Quality (CQ)", L"CBR (bitrate)"};
     streamCodecs_ = {L"H.264 (all platforms)", L"HEVC (YouTube etc.)"};
+    containers_ = {L"MKV (crash-safe)", L"MP4 (compatible)"};
+    hotkeys_ = {L"F6", L"F7", L"F8", L"F9", L"F10", L"F11", L"F12", L"Off"};
+    hotkeyValues_ = {VK_F6, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_F12, 0};
 
     // No implicit game hooking: WGC is the default; DXGI is an explicit choice.
     backends_ = {L"WGC (desktop)", L"DXGI (fullscreen games)"};
@@ -2438,8 +2535,14 @@ void UiApp::ApplySettingsToUi() {
     twitchClientIdText_ = Widen(settings_.twitchClientId);
     micGainPct_ = (int)std::lround(settings_.micGain * 100.0f);
     deskGainPct_ = (int)std::lround(settings_.desktopGain * 100.0f);
+    separateTracks_ = settings_.audioTracks == 2;
     selRate_ = settings_.recordCbr ? 1 : 0;
     selStreamCodec_ = settings_.streamHevc ? 1 : 0;
+    selContainer_ = settings_.container == "mp4" ? 1 : 0;
+    for (size_t i = 0; i < hotkeyValues_.size(); ++i)
+        if (hotkeyValues_[i] == settings_.hotkey) selHotkey_ = (int)i;
+    for (size_t i = 0; i < presetValues_.size(); ++i)
+        if (presetValues_[i] == settings_.streamPreset) selStreamPreset_ = (int)i;
 
     auto find = [](const std::vector<std::wstring>& list, const std::wstring& needle) {
         if (needle.empty()) return 0;
@@ -2515,9 +2618,17 @@ void UiApp::SyncSettingsFromUi() {
     settings_.streamBitrate =
         (uint32_t)std::clamp(_wtoi(streamBitrateText_.c_str()), 100, 200000);
     settings_.streamHevc = selStreamCodec_ == 1;
+    settings_.streamPreset = (selStreamPreset_ >= 0 && selStreamPreset_ < (int)presetValues_.size())
+                                 ? presetValues_[selStreamPreset_]
+                                 : 5;
+    settings_.container = selContainer_ == 1 ? "mp4" : "mkv";
+    if (selHotkey_ >= 0 && selHotkey_ < (int)hotkeyValues_.size())
+        settings_.hotkey = hotkeyValues_[selHotkey_];
+    settings_.recordPath = WithExtension(settings_.recordPath, settings_.container);
     settings_.twitchClientId = Narrow(twitchClientIdText_);
     settings_.micGain = micGainPct_ / 100.0f;
     settings_.desktopGain = deskGainPct_ / 100.0f;
+    settings_.audioTracks = separateTracks_ ? 2 : 1;
     settings_.desktopDevice = (selDesk_ > 0 && selDesk_ < (int)desktops_.size())
                                   ? Narrow(desktops_[selDesk_])
                                   : "";
@@ -2686,7 +2797,7 @@ SessionConfig UiApp::BuildConfig() {
     cfg.adapter = settings_.gpu;
     cfg.fps = settings_.fps;
     cfg.record = settings_.record;
-    cfg.recordPath = settings_.recordPath;
+    cfg.recordPath = WithExtension(settings_.recordPath, settings_.container);
     cfg.stream = settings_.stream;
     cfg.streamUrl = BuildStreamUrl();
     cfg.streamBitrate = settings_.streamBitrate;
@@ -2697,8 +2808,13 @@ SessionConfig UiApp::BuildConfig() {
     cfg.recordCbr = settings_.recordCbr;
     cfg.recordBitrate = settings_.recordBitrate;
     cfg.bframes = settings_.bframes;
-    cfg.lookahead = settings_.lookahead;
-    cfg.multipass = settings_.multipass;
+    cfg.recordLookahead = settings_.lookahead;
+    cfg.recordMultipass = settings_.multipass;
+    cfg.streamPreset = settings_.streamPreset;
+    cfg.streamBframes = settings_.streamBframes;
+    cfg.streamLookahead = settings_.streamLookahead;
+    cfg.streamMultipass = settings_.streamMultipass;
+    cfg.sceneFade = settings_.sceneFade;
     cfg.preset = settings_.preset;
     // Audio sources come from the scene (devices per source).
     cfg.audio.desktop = false;
@@ -2722,6 +2838,7 @@ SessionConfig UiApp::BuildConfig() {
     cfg.audio.compRatio = settings_.micCompRatio / 10.0f;
     cfg.audio.monitor = settings_.monitorMic;
     cfg.audio.monitorDevice = L"default";
+    cfg.audio.tracks = settings_.audioTracks;
     cfg.audio.tracks = 1;
     cfg.webcamDevice = (selWebcam_ > 0 && selWebcam_ < (int)webcams_.size())
                            ? webcams_[selWebcam_]
@@ -2929,6 +3046,14 @@ void UiApp::OnAction(int id) {
         InvalidateRect(hwnd_, nullptr, FALSE);
         return;
     }
+    if (id >= ID_SRC_UP_BASE && id < ID_SRC_UP_BASE + 64) {
+        MoveSource(id - ID_SRC_UP_BASE, -1);
+        return;
+    }
+    if (id >= ID_SRC_DOWN_BASE && id < ID_SRC_DOWN_BASE + 64) {
+        MoveSource(id - ID_SRC_DOWN_BASE, +1);
+        return;
+    }
     if (id >= ID_ACCENT_BASE && id < ID_ACCENT_BASE + kAccentCount) {
         settings_.accent = id - ID_ACCENT_BASE;
         SyncSettingsFromUi();
@@ -2983,6 +3108,21 @@ void UiApp::OnAction(int id) {
                 openCombo_ == ID_COMBO_BACKEND || openCombo_ == ID_COMBO_FPS ||
                 openCombo_ == ID_COMBO_GPU)
                 RestartPreview();
+            if (openCombo_ == ID_COMBO_HOTKEY) {
+                // Re-register the global clip hotkey with the new choice.
+                UnregisterHotKey(hwnd_, 1);
+                if (selHotkey_ >= 0 && selHotkey_ < (int)hotkeyValues_.size() &&
+                    hotkeyValues_[selHotkey_] != 0)
+                    RegisterHotKey(hwnd_, 1, 0, hotkeyValues_[selHotkey_]);
+                SyncSettingsFromUi();
+                SaveUiSettings(settings_);
+                statusText_ = L"Clip hotkey updated";
+                statusError_ = false;
+            }
+            if (openCombo_ == ID_COMBO_CONTAINER || openCombo_ == ID_COMBO_STREAMPRESET) {
+                SyncSettingsFromUi();
+                SaveUiSettings(settings_);
+            }
         }
         openCombo_ = -1;
         InvalidateRect(hwnd_, nullptr, FALSE);
@@ -3350,7 +3490,7 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 press_ == ID_SLIDER_BFRAMES || press_ == ID_SLIDER_MICGAIN ||
                 press_ == ID_SLIDER_DESKGAIN || press_ == ID_SLIDER_RECONNECT ||
                 press_ == ID_SLIDER_GATEDB || press_ == ID_SLIDER_COMPDB ||
-                press_ == ID_SLIDER_COMPRATIO) {
+                press_ == ID_SLIDER_COMPRATIO || press_ == ID_SLIDER_STREAMBFRAMES) {
                 dragging_ = press_;
                 SetSliderFromX(press_, x);
             }
@@ -3381,7 +3521,9 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             for (int tid : {ID_TOGGLE_REPLAY, ID_TOGGLE_DESKTOP, ID_TOGGLE_MIC,
                             ID_TOGGLE_CHROMA, ID_TOGGLE_LOOKAHEAD, ID_TOGGLE_MULTIPASS,
                             ID_TOGGLE_IDLEPREVIEW, ID_TOGGLE_TRAYCLOSE, ID_TOGGLE_MICGATE,
-                            ID_TOGGLE_COMP, ID_TOGGLE_LIGHT, ID_TOGGLE_MONITOR, ID_SRC_CURSOR}) {
+                            ID_TOGGLE_COMP, ID_TOGGLE_LIGHT, ID_TOGGLE_MONITOR, ID_TOGGLE_TRACKS,
+                            ID_TOGGLE_FADE, ID_TOGGLE_STREAMLOOKAHEAD, ID_TOGGLE_STREAMMULTIPASS,
+                            ID_SRC_CURSOR}) {
                 if (press_ == tid) {
                     bool* target = nullptr;
                     switch (tid) {
@@ -3397,9 +3539,15 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         case ID_TOGGLE_COMP: target = &settings_.micComp; break;
                         case ID_TOGGLE_MONITOR: target = &settings_.monitorMic; break;
                         case ID_TOGGLE_LIGHT: target = &settings_.light; break;
+                        case ID_TOGGLE_TRACKS: target = &separateTracks_; break;
+                        case ID_TOGGLE_FADE: target = &settings_.sceneFade; break;
+                        case ID_TOGGLE_STREAMLOOKAHEAD: target = &settings_.streamLookahead; break;
+                        case ID_TOGGLE_STREAMMULTIPASS: target = &settings_.streamMultipass; break;
                         case ID_SRC_CURSOR: target = &scenes_[activeScene_].cursor; break;
                     }
                     if (target) *target = !*target;
+                    SyncSettingsFromUi();
+                    SaveUiSettings(settings_);
                     OnAction(tid);
                     press_ = 0;
                 }

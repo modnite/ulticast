@@ -1,5 +1,6 @@
 #pragma once
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <string>
@@ -8,6 +9,7 @@
 
 #include "aac_encoder.hpp"
 #include "wasapi_capture.hpp"
+#include "wasapi_render.hpp"
 
 struct AudioConfig {
     bool desktop = true;
@@ -21,6 +23,8 @@ struct AudioConfig {
     bool comp = false;      // mic compressor
     float compDb = -18.f;   // compressor threshold (dBFS)
     float compRatio = 3.0f; // compression ratio
+    bool monitor = false;   // play the post-filter mic to an output device
+    std::wstring monitorDevice;  // "" = default output
     int bitrateKbps = 160;
     int tracks = 1;  // 1 = mix only, 2 = mix + mic-only track (file output)
 };
@@ -55,6 +59,8 @@ public:
         compDb_.store(db);
         compRatio_.store(ratio < 1.f ? 1.f : ratio);
     }
+    // Mic monitoring (hear the post-filter mic in headphones). Safe at runtime.
+    void SetMonitoring(bool on, const std::wstring& device);
     void Stop();
 
     bool DesktopActive() const { return desktop_ && desktop_->running.load(); }
@@ -68,10 +74,14 @@ public:
 
 private:
     void Pump();
+    void RecoverDevice(std::unique_ptr<WasapiCapture>& src, const std::wstring& match,
+                       bool loopback, std::chrono::steady_clock::time_point* lastTry,
+                       const char* label);
     bool Fill(const std::unique_ptr<WasapiCapture>& src, float gain, float* dst);
 
     AudioConfig cfg_;
     std::unique_ptr<WasapiCapture> desktop_, mic_;
+    std::unique_ptr<WasapiRender> monitor_;
     std::unique_ptr<AacEncoder> encMix_, encMic_;
     Sink sink_;
     std::function<bool()> pausedFn_;
@@ -90,4 +100,5 @@ private:
     int sampleRate_ = 48000;
     bool loggedDesktopLost_ = false;
     bool loggedMicLost_ = false;
+    std::chrono::steady_clock::time_point lastDesktopTry_{}, lastMicTry_{};
 };

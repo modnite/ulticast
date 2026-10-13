@@ -69,6 +69,14 @@ bool AudioMixer::StartDevices(std::string* err) {
         *err = "no audio sources available";
         return false;
     }
+    if (cfg_.monitor) {
+        SetMonitoring(true, cfg_.monitorDevice);
+        if (!monitor_) {
+            std::printf("[audio] monitoring disabled (no output device)\n");
+        } else if (cfg_.desktop) {
+            std::printf("[audio] note: monitor + desktop audio can feed back through speakers\n");
+        }
+    }
     return true;
 }
 
@@ -81,8 +89,7 @@ void AudioMixer::AttachSink(const Sink& sink) {
     pump_ = std::thread(&AudioMixer::Pump, this);
 }
 
-bool AudioMixer::Fill(const std::unique_ptr<WasapiCapture>& src, float gain, float* dst) {
-    const size_t F = (size_t)encMix_->FrameSize();
+bool AudioMixer::Fill(const std::unique_ptr<WasapiCapture>& src, float gain, float* dst) {    const size_t F = (size_t)encMix_->FrameSize();
     size_t got = src->ring.Read(dst, F);
     for (size_t i = got; i < F; ++i) {
         dst[2 * i] = 0.f;
@@ -90,6 +97,47 @@ bool AudioMixer::Fill(const std::unique_ptr<WasapiCapture>& src, float gain, flo
     }
     for (size_t i = 0; i < F * 2; ++i) dst[i] *= gain;
     return got > 0;
+}
+
+void AudioMixer::SetMonitoring(bool on, const std::wstring& device) {
+    if (on && !monitor_) {
+        auto mon = std::make_unique<WasapiRender>();
+        std::string e;
+        if (mon->Start(device, sampleRate_, &e)) {
+            monitor_ = std::move(mon);
+        } else {
+            std::printf("[audio] monitoring unavailable: %s\n", e.c_str());
+        }
+    } else if (!on && monitor_) {
+        monitor_->Stop();
+        monitor_.reset();
+        std::printf("[audio] monitoring off\n");
+    }
+}
+
+void AudioMixer::RecoverDevice(std::unique_ptr<WasapiCapture>& src, const std::wstring& match,
+                               bool loopback, std::chrono::steady_clock::time_point* lastTry,
+                               const char* label) {
+    if (!src || src->running.load() || !src->deviceLost.load()) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (*lastTry != std::chrono::steady_clock::time_point{} &&
+        now - *lastTry < std::chrono::seconds(3))
+        return;
+    *lastTry = now;
+
+    src->Stop();
+    auto fresh = std::make_unique<WasapiCapture>();
+    std::string e;
+    if (fresh->Start(loopback, match.empty() ? L"default" : match, &e)) {
+        src = std::move(fresh);
+        std::printf("[audio] %s reconnected: %ls\n", label, src->ActiveDevice().c_str());
+        if (loopback)
+            loggedDesktopLost_ = false;
+        else
+            loggedMicLost_ = false;
+    } else {
+        std::printf("[audio] %s reconnect failed: %s\n", label, e.c_str());
+    }
 }
 
 void AudioMixer::Pump() {
@@ -107,12 +155,16 @@ void AudioMixer::Pump() {
         if (desktop_ && !desktop_->running.load() && desktop_->deviceLost.load() &&
             !loggedDesktopLost_) {
             loggedDesktopLost_ = true;
-            std::printf("[audio] desktop device was lost; restart the session\n");
+            std::printf("[audio] desktop device lost; trying to reconnect\n");
         }
         if (mic_ && !mic_->running.load() && mic_->deviceLost.load() && !loggedMicLost_) {
             loggedMicLost_ = true;
-            std::printf("[audio] microphone device was lost; restart the session\n");
+            std::printf("[audio] microphone device lost; trying to reconnect\n");
         }
+        // Auto-recovery: unplugging/replugging a headset (or waking a device)
+        // restarts that endpoint in place; the ring gap is a few milliseconds.
+        RecoverDevice(desktop_, cfg_.desktopDevice, true, &lastDesktopTry_, "desktop");
+        RecoverDevice(mic_, cfg_.micDevice, false, &lastMicTry_, "microphone");
         if (pausedFn_ && pausedFn_()) {
             if (desktop_) desktop_->ring.DropAll();
             if (mic_) mic_->ring.DropAll();
@@ -186,6 +238,9 @@ void AudioMixer::Pump() {
         } else if (compEnv_ != 0.f) {
             compEnv_ = 0.f;
         }
+
+        // Monitoring: play the post-filter mic to the chosen output device.
+        if (monitor_ && monitor_->running()) monitor_->ring.Write(m.data(), (size_t)F);
 
         // Diagnostics: how much real audio went in vs media time emitted.
         {

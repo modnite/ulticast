@@ -232,6 +232,7 @@ bool LoadUiSettings(UiSettings* s) {
         else if (key == "micComp") s->micComp = (val == "1");
         else if (key == "micCompDb") s->micCompDb = atoi(val.c_str());
         else if (key == "micCompRatio") s->micCompRatio = atoi(val.c_str());
+        else if (key == "monitorMic") s->monitorMic = (val == "1");
         else if (key == "idlePreview") s->idlePreview = (val == "1");
         else if (key == "closeToTray") s->closeToTray = (val == "1");
         else if (key == "accent") s->accent = atoi(val.c_str());
@@ -338,6 +339,7 @@ bool SaveUiSettings(const UiSettings& s) {
     f << "micComp=" << (s.micComp ? 1 : 0) << "\n";
     f << "micCompDb=" << s.micCompDb << "\n";
     f << "micCompRatio=" << s.micCompRatio << "\n";
+    f << "monitorMic=" << (s.monitorMic ? 1 : 0) << "\n";
     f << "idlePreview=" << (s.idlePreview ? 1 : 0) << "\n";
     f << "closeToTray=" << (s.closeToTray ? 1 : 0) << "\n";
     f << "accent=" << s.accent << "\n";

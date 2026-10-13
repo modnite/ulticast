@@ -87,6 +87,7 @@ struct Options {
     bool comp = false;
     int compDb = -18;
     int compRatioX10 = 30;
+    bool monitorMic = false;
     int audioBitrate = 160;
     int tracks = 1;
 
@@ -117,6 +118,7 @@ struct Options {
     std::string browserUrl;
     int browserWidth = 0, browserHeight = 0;
     bool showCursor = true;
+    bool forceDshow = false;
 };
 
 static int ParseHotkey(const std::string& s) {
@@ -246,6 +248,7 @@ int wmain(int argc, wchar_t** argv) {
         }
         else if (a == L"--browser") takeS(o.browserUrl);
         else if (a == L"--no-cursor") o.showCursor = false;
+        else if (a == L"--force-dshow") o.forceDshow = true;
         else if (a == L"--browser-size") {
             std::wstring v;
             takeNext(v);
@@ -262,6 +265,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == L"--gate") { o.gate = true; takeInt(o.gateDb); }
         else if (a == L"--comp") { o.comp = true; takeInt(o.compDb); }
         else if (a == L"--comp-ratio") { int r = 30; takeInt(r); o.compRatioX10 = r; }
+        else if (a == L"--monitor-mic") o.monitorMic = true;
         else if (a == L"--tracks") takeInt(o.tracks);
         else if (a == L"--platform") takeS(o.platform);
         else if (a == L"--key") takeS(o.streamKey);
@@ -444,6 +448,7 @@ int wmain(int argc, wchar_t** argv) {
     cfg.audio.comp = o.comp;
     cfg.audio.compDb = (float)o.compDb;
     cfg.audio.compRatio = o.compRatioX10 / 10.0f;
+    cfg.audio.monitor = o.monitorMic;
     cfg.audio.bitrateKbps = o.audioBitrate;
     cfg.audio.tracks = streaming ? 1 : o.tracks;
     cfg.webcam = o.webcam;
@@ -461,6 +466,7 @@ int wmain(int argc, wchar_t** argv) {
     cfg.browserWidth = o.browserWidth;
     cfg.browserHeight = o.browserHeight;
     cfg.showCursor = o.showCursor;
+    cfg.forceDshow = o.forceDshow;
 
     Session session;
     std::string err;

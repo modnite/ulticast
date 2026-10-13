@@ -31,10 +31,12 @@ add_library(ulticast_core STATIC
     src/core/nvenc_encoder.cpp
     src/core/ffmuxer.cpp
     src/core/wasapi_capture.cpp
+    src/core/wasapi_render.cpp
     src/core/aac_encoder.cpp
     src/core/audio_mixer.cpp
     src/core/compositor.cpp
     src/core/webcam_mf.cpp
+    src/core/capture_dshow.cpp
     src/core/replay_buffer.cpp
     src/core/browser_cef.cpp
     src/core/diag.cpp

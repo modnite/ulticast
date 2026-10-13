@@ -50,6 +50,7 @@ struct UiSettings {
     bool micComp = false;   // mic compressor
     int micCompDb = -18;    // compressor threshold in dBFS
     int micCompRatio = 30;  // ratio x10 (30 = 3.0:1)
+    bool monitorMic = false;  // hear the mic in the default output device
 
     bool webcam = false;
     std::string webcamDevice;  // UTF-8 substring; empty = default camera

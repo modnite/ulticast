@@ -76,9 +76,10 @@ Please attach `diagnostics-*.txt` and the newest log to
   game / video devices incl. capture cards / mic / desktop audio / browser), per-scene sources with
   live add/configure/remove — done, verified
 - **Stage 10** roadmap: mic noise gate (live threshold, CLI `--gate`) — done, verified
-- **Stage 11** (unreleased): mic compressor (-1 dB safety clip), multiple capture sources per scene
-  (second monitor/window as a PiP layer), themes (8 accents + light/dark), dead-space-free layout,
-  cleaner action buttons with record/play/stop glyphs — built and tested locally
+- **Stage 11** (unreleased): mic compressor (-1 dB safety clip), mic monitoring, multiple capture
+  sources per scene (second monitor/window as a PiP layer), DirectShow camera fallback, audio device
+  auto-recovery, themes (8 accents + light/dark), dead-space-free layout, cleaner action buttons with
+  record/play/stop glyphs — built and tested locally (12/12 smoke tests)
 - Next: lock in, then release; on-hardware validation on the RTX 3080 rig
 
 ## The UI (Ulticast-ui.exe)
@@ -100,7 +101,7 @@ together (the same separation ShadowPlay/OBS users expect).
 | Display Capture | DISP | monitor — **add more than one to layer a second monitor as a PiP** |
 | Window Capture | WIN | window picker (scrollable list) — also works as a PiP layer |
 | Game Capture | GAME | monitor + DXGI duplication (fullscreen games, first capture) |
-| Video Capture Device | VID | **any camera or capture card** — multiple devices can run at once, each with its own PiP corner or free position (drag it on the preview) |
+| Video Capture Device | VID | **any camera or capture card** — Media Foundation first, with an automatic **DirectShow fallback** for virtual cameras MF cannot see (some NVIDIA Broadcast builds, Snap Camera); multiple devices can run at once, each with its own PiP corner or free position (drag it on the preview) |
 | Microphone | MIC | capture device |
 | Desktop Audio | SYS | output device (loopback) |
 | Browser Overlay | WEB | HTML file / https:// URL (set in Settings) |
@@ -108,9 +109,11 @@ together (the same separation ShadowPlay/OBS users expect).
 - **Independent outputs**: Start Recording and Go Live are separate actions; either can start the
   session and the other can be switched on later without interrupting the first (recording and
   streaming use separate NVENC sessions).
-- **Audio filters**: noise gate (2 ms attack / 120 ms hold / 150 ms release) and a compressor with a
-  -1 dB safety clip; both adjustable live while recording (`--gate DB`, `--comp DB`,
-  `--comp-ratio R` on the CLI).
+- **Audio filters**: noise gate (2 ms attack / 120 ms hold / 150 ms release), a compressor with a
+  -1 dB safety clip, and **mic monitoring** (hear the post-filter mic in your headphones); all
+  adjustable live while recording (`--gate DB`, `--comp DB`, `--comp-ratio R`, `--monitor-mic`).
+- **Device auto-recovery**: unplugging/replugging an output (or waking a sleeping device) restarts
+  that endpoint in place — the session keeps running instead of losing audio.
 - **Themes**: eight accent colours (violet, cyan, emerald, amber, rose, azure, magenta, slate) with
   light and dark variants; everything (buttons, switches, sliders, caption bar) follows the accent.
 - **Layout**: no dead space — the rail's leftover room holds the activity log, mode cards fill their
@@ -178,7 +181,7 @@ Ulticast --platform twitch --key <key> --also-record backup.mkv
 | Scene | `--webcam`, `--webcam-device`, `--webcam-pos`, `--webcam-size`, `--chroma RRGGBB`, `--chroma-layer webcam\|capture`, `--browser URL\|FILE`, `--browser-size WxH` |
 | Clips | `--replay`, `--replay-seconds`, `--replay-prefix`, `--hotkey`, `--clip-at` |
 | Stream | `--platform`, `--key`, `--rtmp URL`, `--also-record PATH`, `--reconnect N` |
-| Audio | `--no-audio`, `--no-desktop-audio`, `--mic`, `--mic-device`, `--desktop-device`, `--mic-gain X`, `--desktop-gain X`, `--gate DB`, `--audio-bitrate N`, `--tracks 1\|2` |
+| Audio | `--no-audio`, `--no-desktop-audio`, `--mic`, `--mic-device`, `--desktop-device`, `--mic-gain X`, `--desktop-gain X`, `--gate DB`, `--comp DB`, `--comp-ratio R`, `--monitor-mic`, `--audio-bitrate N`, `--tracks 1\|2` |
 | Diagnostics | `--diagnostics`, `--open-logs`, `--version` |
 
 ## Streaming targets
@@ -207,16 +210,18 @@ Ulticast --platform twitch --key <key> --also-record backup.mkv
 
 - **Twitch login (OAuth)** instead of pasting a stream key — requires an app registration and the
   device-code flow.
-- **Audio filters, part 3**: per-source monitoring (hear the mic in your headphones).
-- **DirectShow camera fallback** for virtual cameras that Media Foundation does not enumerate.
-- Audio device auto-recovery when a device is unplugged mid-session (currently logs and keeps the
-  session running with the remaining devices).
 
 ### Done
 
 - **Audio filters, part 1**: mic noise gate with live threshold (`--gate DB`).
 - **Audio filters, part 2**: mic compressor with live threshold/ratio and a -1 dB safety clip
   (`--comp DB`, `--comp-ratio R`).
+- **Audio filters, part 3**: mic monitoring to the default output (`--monitor-mic`), with a
+  headphones hint.
 - **Multiple capture sources per scene**: extra display/window captures composite as PiP layers
   (position configurable per source).
+- **DirectShow camera fallback**: video devices are listed from both Media Foundation and
+  DirectShow, and the engine falls back to a DirectShow graph (SampleGrabber) when MF cannot open
+  a device — verified with a real camera (`--force-dshow`).
+- **Audio device auto-recovery**: lost endpoints reconnect in place instead of ending the session.
 - **Themes**: 8 accent colours, light/dark, caption bar follows the accent.

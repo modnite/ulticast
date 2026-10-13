@@ -130,7 +130,20 @@ $pv = PeakVolume "$t\comp.mkv"
 Check 'compressor: peaks are limited (safety clip at -1 dB)' ($pv -le -0.9) `
       ("max=" + $pv + " dB")
 
-# --------------------------------------------------------------- 8. cursor
+# Mic monitoring: the render endpoint must initialize (audio is played to the
+# default output while the recording keeps its own audio).
+$monOut = & $exe --backend wgc --monitor 0 --seconds 3 --out "$t\mon.mkv" --mic --monitor-mic 2>&1 | Out-String
+Check 'monitor mic: output endpoint initializes' ($monOut -match '\[audio\] monitor:') `
+      'no monitor line in output'
+
+# ------------------------------------------------------ 9. DirectShow camera
+# The DirectShow fallback (for virtual cameras MF cannot see) must capture real
+# frames through the SampleGrabber graph.
+& $exe --backend wgc --monitor 0 --seconds 3 --out "$t\ds.mkv" --webcam --force-dshow 2>&1 | Out-Null
+$frames = [int](ProbeInfo "$t\ds.mkv" 'stream=nb_read_frames' | Select-Object -First 1)
+Check 'dshow camera: DirectShow fallback captures frames' ($frames -ge 60) "frames=$frames"
+
+# --------------------------------------------------------------- 10. cursor
 # Park the cursor, then capture the same desktop twice *concurrently* (one run
 # with cursor compositing, one without). Because both captures happen at the
 # same wall-clock time, the desktop content is identical and the only pixel

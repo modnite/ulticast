@@ -306,15 +306,35 @@ void Session::StartVideoSources() {
         if (s.type != SessionSourceType::Webcam || !s.enabled) continue;
         VideoLayer v;
         v.device = s.device;
-        v.cam = std::make_unique<WebcamCapture>();
         const std::wstring match = s.device.empty() ? L"default" : Widen(s.device);
-        std::string e;
-        if (!v.cam->Start(match, &e)) {
-            Log("[video] disabled (%s): %s", s.device.empty() ? "default" : s.device.c_str(),
-                e.c_str());
-            v.cam.reset();
+        std::string eMf, eDs;
+
+        auto tryMf = [&]() -> bool {
+            auto cam = std::make_unique<WebcamCapture>();
+            if (cam->Start(match, &eMf)) {
+                v.cam = std::move(cam);
+                return true;
+            }
+            return false;
+        };
+        auto tryDs = [&]() -> bool {
+            auto cam = std::make_unique<DshowCapture>();
+            if (cam->Start(match, &eDs)) {
+                v.cam = std::move(cam);
+                return true;
+            }
+            return false;
+        };
+
+        // Media Foundation first (shared-mode, lower latency); DirectShow as the
+        // fallback for virtual cameras that only register with DirectShow.
+        bool ok = cfg_.forceDshow ? (tryDs() || tryMf()) : (tryMf() || tryDs());
+        if (ok) {
+            Log("[video] %ls%s", v.cam->ActiveDevice().c_str(),
+                v.cam->IsDirectShow() ? " (DirectShow)" : "");
         } else {
-            Log("[video] %ls", v.cam->ActiveDevice().c_str());
+            Log("[video] disabled (%s): MF: %s | DirectShow: %s",
+                s.device.empty() ? "default" : s.device.c_str(), eMf.c_str(), eDs.c_str());
         }
         videos_.push_back(std::move(v));
     }

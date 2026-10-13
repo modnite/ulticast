@@ -41,6 +41,7 @@
 #include "../core/version.hpp"
 #include "../core/wasapi_capture.hpp"
 #include "../core/webcam_mf.hpp"
+#include "../core/capture_dshow.hpp"
 #include "../core/capture_wgc.hpp"
 #include "../session.hpp"
 
@@ -204,6 +205,7 @@ enum {
     ID_TOGGLE_COMP,
     ID_SLIDER_COMPDB,
     ID_SLIDER_COMPRATIO,
+    ID_TOGGLE_MONITOR,
     ID_FIELD_KEY,
     ID_FIELD_URL,
     ID_FIELD_CHROMA,
@@ -501,6 +503,7 @@ private:
     bool lastCompOn_ = false;
     int lastCompDb_ = -18;
     int lastCompRatio_ = 30;
+    bool lastMonitor_ = false;
     std::wstring keyText_, urlText_, chromaText_, browserText_;
 
     // pages + scenes
@@ -1113,6 +1116,10 @@ void UiApp::Paint() {
         lastCompRatio_ = settings_.micCompRatio;
         session_.SetAudioCompressor(settings_.micComp, (float)settings_.micCompDb,
                                     settings_.micCompRatio / 10.0f);
+    }
+    if (sessionRunning_ && settings_.monitorMic != lastMonitor_) {
+        lastMonitor_ = settings_.monitorMic;
+        session_.SetAudioMonitoring(settings_.monitorMic);
     }
 
     RefreshPreview();
@@ -1906,7 +1913,7 @@ void UiApp::DrawSettingsPage() {
         const float x = 550, w = 490, cw = w - 20;
         float cy = 64;
 
-        Card(x, cy, w, pad + headH + 3 * rowH + 2 * rowGap + pad, L"AUDIO FILTERS");
+        Card(x, cy, w, pad + headH + 4 * rowH + 3 * rowGap + pad, L"AUDIO FILTERS");
         float y = cy + pad + headH + 4;
         Toggle(ID_TOGGLE_MICGATE, S(x + pad, y, 130, rowH), L"Noise gate", &settings_.micGate);
         Slider(ID_SLIDER_GATEDB, S(x + pad + 146, y, cw - 146, rowH), -80, -20,
@@ -1920,7 +1927,11 @@ void UiApp::DrawSettingsPage() {
                L"Ratio %.1f:1", 0.1f);
         Text(L"-1 dB safety clip always on", fmtSmall_, S(x + pad + 244, y, cw - 244, rowH),
              WithAlpha(kTextDim, 0.7f));
-        cy += pad + headH + 3 * rowH + 2 * rowGap + pad + cardGap;
+        y += rowH + rowGap;
+        Toggle(ID_TOGGLE_MONITOR, S(x + pad, y, 221, rowH), L"Monitor mic", &settings_.monitorMic);
+        Text(L"headphones recommended", fmtSmall_, S(x + pad + 249, y, cw - 249, rowH),
+             WithAlpha(kTextDim, 0.7f));
+        cy += pad + headH + 4 * rowH + 3 * rowGap + pad + cardGap;
 
         Card(x, cy, w, pad + headH + rowH + pad, L"ADVANCED ENCODER");
         y = cy + pad + headH + 4;
@@ -2139,6 +2150,21 @@ void UiApp::ReloadDevices() {
     webcams_.clear();
     webcams_.push_back(L"Default camera");
     for (auto& d : WebcamCapture::ListDevices()) webcams_.push_back(d);
+    // Merge DirectShow-only devices (virtual cameras MF cannot see) so they are
+    // selectable; the engine falls back to DirectShow when MF cannot open one.
+    for (auto& d : DshowCapture::ListDevices()) {
+        bool have = false;
+        for (auto& existing : webcams_) {
+            std::wstring a = existing, b = d;
+            for (auto& c : a) c = (wchar_t)towlower(c);
+            for (auto& c : b) c = (wchar_t)towlower(c);
+            if (a == b) {
+                have = true;
+                break;
+            }
+        }
+        if (!have) webcams_.push_back(d);
+    }
 
     mics_.clear();
     mics_.push_back(L"Default microphone");
@@ -2486,6 +2512,8 @@ SessionConfig UiApp::BuildConfig() {
     cfg.audio.comp = settings_.micComp;
     cfg.audio.compDb = (float)settings_.micCompDb;
     cfg.audio.compRatio = settings_.micCompRatio / 10.0f;
+    cfg.audio.monitor = settings_.monitorMic;
+    cfg.audio.monitorDevice = L"default";
     cfg.audio.tracks = 1;
     cfg.webcamDevice = (selWebcam_ > 0 && selWebcam_ < (int)webcams_.size())
                            ? webcams_[selWebcam_]
@@ -3122,7 +3150,7 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                             ID_TOGGLE_MIC, ID_TOGGLE_REPLAY, ID_TOGGLE_CHROMA,
                             ID_TOGGLE_BROWSER, ID_TOGGLE_LOOKAHEAD, ID_TOGGLE_MULTIPASS,
                             ID_TOGGLE_IDLEPREVIEW, ID_TOGGLE_TRAYCLOSE, ID_TOGGLE_MICGATE,
-                            ID_TOGGLE_COMP, ID_TOGGLE_LIGHT, ID_SRC_CURSOR}) {
+                            ID_TOGGLE_COMP, ID_TOGGLE_LIGHT, ID_TOGGLE_MONITOR, ID_SRC_CURSOR}) {
                 if (press_ == tid) {
                     bool* target = nullptr;
                     switch (tid) {
@@ -3140,6 +3168,7 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         case ID_TOGGLE_TRAYCLOSE: target = &settings_.closeToTray; break;
                         case ID_TOGGLE_MICGATE: target = &settings_.micGate; break;
                         case ID_TOGGLE_COMP: target = &settings_.micComp; break;
+                        case ID_TOGGLE_MONITOR: target = &settings_.monitorMic; break;
                         case ID_TOGGLE_LIGHT: target = &settings_.light; break;
                         case ID_SRC_CURSOR: target = &scenes_[activeScene_].cursor; break;
                     }

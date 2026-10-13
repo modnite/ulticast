@@ -13,6 +13,7 @@
 
 #include "core/audio_mixer.hpp"
 #include "core/browser_cef.hpp"
+#include "core/capture_dshow.hpp"
 #include "core/capture_dxgi.hpp"
 #include "core/capture_wgc.hpp"
 #include "core/compositor.hpp"
@@ -98,6 +99,7 @@ struct SessionConfig {
     int browserHeight = 0;
 
     bool showCursor = true;      // DXGI duplication cursor compositing
+    bool forceDshow = false;     // debug/testing: try DirectShow before Media Foundation
 
     // Scene: ordered sources. Empty -> a default scene is built from the
     // webcam/browser flags above (keeps the CLI behaviour).
@@ -157,6 +159,8 @@ public:
     void SetAudioCompressor(bool on, float db, float ratio) {
         mixer_.SetCompressor(on, db, ratio);
     }
+    // Mic monitoring (hear the post-filter mic in headphones).
+    void SetAudioMonitoring(bool on) { mixer_.SetMonitoring(on, L"default"); }
 
     // Runtime output control (OBS-style separate buttons). Commands are queued
     // and applied on the capture thread between frames, so they never race with
@@ -249,7 +253,7 @@ private:
     // One entry per Video source (webcam, capture card, ...). Multiple devices
     // can be composited at once; each owns its capture thread and texture.
     struct VideoLayer {
-        std::unique_ptr<WebcamCapture> cam;
+        std::unique_ptr<VideoCaptureBase> cam;
         Microsoft::WRL::ComPtr<ID3D11Texture2D> tex;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
         uint32_t w = 0, h = 0;

@@ -1,5 +1,5 @@
 #pragma once
 
 // Single source of truth for the app version (also shown in diagnostics).
-#define ULTI_VERSION "0.9.2"
+#define ULTI_VERSION "0.9.3"
 #define ULTI_REPO "https://github.com/modnite/ulticast"

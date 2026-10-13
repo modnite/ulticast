@@ -230,6 +230,8 @@ enum {
     ID_TWITCH_CONNECT = 5200,
     ID_TWITCH_DISCONNECT,
     ID_FIELD_TWITCHCID,
+    ID_BROWSER_TEST,
+    ID_BROWSER_RELOAD,
     ID_COMBO_CONTAINER,
     ID_TOGGLE_TRACKS,
     ID_COMBO_HOTKEY,
@@ -423,6 +425,37 @@ private:
     void SetSliderFromX(int id, float x);
     void Field(int id, const D2D1_RECT_F& r, std::wstring* text, bool password,
                const wchar_t* placeholder);
+
+    // ---- standard single-line text editing (the focused field) -------------
+    struct FieldEdit {
+        std::wstring* text = nullptr;
+        int caret = 0;
+        int anchor = 0;   // selection anchor; == caret when nothing is selected
+        float scroll = 0; // horizontal offset in device px (keeps the caret visible)
+        uint64_t lastClickMs = 0;
+        int lastClickField = 0;
+    };
+    FieldEdit edit_;
+    void EditBind(std::wstring* text);
+    void EditClearSelection();
+    std::wstring* EditSelectedText();  // null when there is no selection
+    void EditInsert(wchar_t c);
+    void EditDeleteBack();
+    void EditDeleteForward();
+    void EditMove(int delta, bool select);
+    void EditWordMove(int dir, bool select);
+    void EditMoveTo(int index, bool select);
+    void EditHome(bool select);
+    void EditEnd(bool select);
+    void EditSelectAll();
+    void EditCopy(bool cut);
+    void EditPaste();
+    void EditSelectWordAt(int index);
+    void EditEnsureCaretVisible(float viewWidthDevicePx);
+    int EditCaretIndexFromX(float textOriginX, float clickX) const;
+    float EditCaretX(int index) const;   // device px offset inside the text
+    void AfterFieldEdit();               // per-field filtering / scene-name sync
+    std::wstring* FieldTarget(int id);   // bound string for a field id (null if not a field)
     void SectionLabel(const std::wstring& s, float x, float y);
     void Pill(const D2D1_RECT_F& r, const D2D1_COLOR_F& color, const std::wstring& label);
 
@@ -530,6 +563,8 @@ private:
     bool lastMonitor_ = false;
     bool separateTracks_ = false;
     void MoveSource(int index, int delta);
+    std::wstring browserStatus_;  // last "[browser] ..." line (load status)
+    void EnsureBrowserSource();
     std::wstring keyText_, urlText_, chromaText_, browserText_;
 
     // pages + scenes
@@ -685,6 +720,7 @@ bool UiApp::Init(HINSTANCE instance) {
         std::lock_guard<std::mutex> lock(logMu_);
         logLines_.push_back(Widen(msg));
         if (logLines_.size() > 50) logLines_.pop_front();
+        if (msg.rfind("[browser]", 0) == 0) browserStatus_ = Widen(msg.substr(9));
     });
 
     if (settings_.hotkey != 0) RegisterHotKey(hwnd_, 1, 0, settings_.hotkey);
@@ -1080,37 +1116,283 @@ void UiApp::Slider(int id, const D2D1_RECT_F& r, int minV, int maxV, int* value,
          DWRITE_TEXT_ALIGNMENT_TRAILING);
 }
 
+void UiApp::EditBind(std::wstring* text) {
+    edit_.text = text;
+    edit_.caret = text ? (int)text->size() : 0;
+    edit_.anchor = edit_.caret;
+    edit_.scroll = 0.f;
+}
+
+void UiApp::EditClearSelection() { edit_.anchor = edit_.caret; }
+
+std::wstring* UiApp::EditSelectedText() {
+    if (!edit_.text || edit_.anchor == edit_.caret) return nullptr;
+    return edit_.text;
+}
+
+void UiApp::EditInsert(wchar_t c) {
+    if (!edit_.text) return;
+    if (edit_.anchor != edit_.caret) {
+        const int lo = (std::min)(edit_.anchor, edit_.caret);
+        const int hi = (std::max)(edit_.anchor, edit_.caret);
+        edit_.text->erase((size_t)lo, (size_t)(hi - lo));
+        edit_.caret = lo;
+        edit_.anchor = lo;
+    }
+    const int at = std::clamp(edit_.caret, 0, (int)edit_.text->size());
+    edit_.text->insert(edit_.text->begin() + at, c);
+    edit_.caret = at + 1;
+    edit_.anchor = edit_.caret;
+}
+
+void UiApp::EditDeleteBack() {
+    if (!edit_.text) return;
+    if (edit_.anchor != edit_.caret) {
+        const int lo = (std::min)(edit_.anchor, edit_.caret);
+        const int hi = (std::max)(edit_.anchor, edit_.caret);
+        edit_.text->erase((size_t)lo, (size_t)(hi - lo));
+        edit_.caret = lo;
+        edit_.anchor = lo;
+        return;
+    }
+    if (edit_.caret > 0) {
+        edit_.text->erase((size_t)edit_.caret - 1, 1);
+        --edit_.caret;
+        edit_.anchor = edit_.caret;
+    }
+}
+
+void UiApp::EditDeleteForward() {
+    if (!edit_.text) return;
+    if (edit_.anchor != edit_.caret) {
+        EditDeleteBack();
+        return;
+    }
+    if (edit_.caret < (int)edit_.text->size()) edit_.text->erase((size_t)edit_.caret, 1);
+}
+
+void UiApp::EditMoveTo(int index, bool select) {
+    if (!edit_.text) return;
+    edit_.caret = std::clamp(index, 0, (int)edit_.text->size());
+    if (!select) edit_.anchor = edit_.caret;
+}
+
+void UiApp::EditMove(int delta, bool select) {
+    if (!edit_.text) return;
+    // Moving with a selection and no shift collapses to the selection edge.
+    if (!select && edit_.anchor != edit_.caret) {
+        edit_.caret = delta < 0 ? (std::min)(edit_.anchor, edit_.caret)
+                                : (std::max)(edit_.anchor, edit_.caret);
+        edit_.anchor = edit_.caret;
+        return;
+    }
+    EditMoveTo(edit_.caret + delta, select);
+}
+
+void UiApp::EditWordMove(int dir, bool select) {
+    if (!edit_.text) return;
+    const std::wstring& s = *edit_.text;
+    int i = edit_.caret;
+    auto isWord = [](wchar_t c) { return iswalnum(c) != 0; };
+    if (dir < 0) {
+        while (i > 0 && !isWord(s[i - 1])) --i;
+        while (i > 0 && isWord(s[i - 1])) --i;
+    } else {
+        const int n = (int)s.size();
+        while (i < n && !isWord(s[i])) ++i;
+        while (i < n && isWord(s[i])) ++i;
+    }
+    EditMoveTo(i, select);
+}
+
+void UiApp::EditHome(bool select) { EditMoveTo(0, select); }
+void UiApp::EditEnd(bool select) { EditMoveTo((int)(edit_.text ? edit_.text->size() : 0), select); }
+
+void UiApp::EditSelectAll() {
+    if (!edit_.text) return;
+    edit_.anchor = 0;
+    edit_.caret = (int)edit_.text->size();
+}
+
+void UiApp::EditCopy(bool cut) {
+    if (!edit_.text || edit_.anchor == edit_.caret) return;
+    const int lo = (std::min)(edit_.anchor, edit_.caret);
+    const int hi = (std::max)(edit_.anchor, edit_.caret);
+    if (OpenClipboard(hwnd_)) {
+        EmptyClipboard();
+        const size_t bytes = (size_t)(hi - lo + 1) * sizeof(wchar_t);
+        if (HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
+            if (auto* dst = (wchar_t*)GlobalLock(h)) {
+                memcpy(dst, edit_.text->c_str() + lo, (size_t)(hi - lo) * sizeof(wchar_t));
+                dst[hi - lo] = 0;
+                GlobalUnlock(h);
+                SetClipboardData(CF_UNICODETEXT, h);
+            }
+        }
+        CloseClipboard();
+    }
+    if (cut) {
+        edit_.text->erase((size_t)lo, (size_t)(hi - lo));
+        edit_.caret = lo;
+        edit_.anchor = lo;
+    }
+}
+
+void UiApp::EditPaste() {
+    if (!edit_.text) return;
+    if (!OpenClipboard(hwnd_)) return;
+    if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
+        if (auto* src = (wchar_t*)GlobalLock(h)) {
+            std::wstring text = src;
+            GlobalUnlock(h);
+            text.erase(std::remove_if(text.begin(), text.end(),
+                                      [](wchar_t c) { return c < 32 || c == 127; }),
+                       text.end());
+            for (wchar_t c : text) EditInsert(c);
+        }
+    }
+    CloseClipboard();
+}
+
+void UiApp::EditSelectWordAt(int index) {
+    if (!edit_.text) return;
+    const std::wstring& s = *edit_.text;
+    auto isWord = [](wchar_t c) { return iswalnum(c) != 0; };
+    int lo = std::clamp(index, 0, (int)s.size());
+    int hi = lo;
+    while (lo > 0 && isWord(s[lo - 1])) --lo;
+    while (hi < (int)s.size() && isWord(s[hi])) ++hi;
+    if (lo == hi) {  // not on a word: select nothing
+        EditMoveTo(lo, false);
+        return;
+    }
+    edit_.anchor = lo;
+    edit_.caret = hi;
+}
+
+float UiApp::EditCaretX(int index) const {
+    if (!edit_.text) return 0.f;
+    std::wstring shown = *edit_.text;
+    ComPtr<IDWriteTextLayout> layout;
+    if (FAILED(dwrite_->CreateTextLayout(shown.c_str(), (UINT32)shown.size(), fmtBody_.Get(),
+                                         10000.f, 100.f, layout.GetAddressOf())))
+        return 0.f;
+    FLOAT x = 0, y = 0;
+    DWRITE_HIT_TEST_METRICS m{};
+    layout->HitTestTextPosition((UINT32)std::clamp(index, 0, (int)shown.size()), FALSE, &x, &y, &m);
+    return x;
+}
+
+int UiApp::EditCaretIndexFromX(float textOriginX, float clickX) const {
+    if (!edit_.text) return 0;
+    std::wstring shown = *edit_.text;
+    ComPtr<IDWriteTextLayout> layout;
+    if (FAILED(dwrite_->CreateTextLayout(shown.c_str(), (UINT32)shown.size(), fmtBody_.Get(),
+                                         10000.f, 100.f, layout.GetAddressOf())))
+        return 0;
+    FLOAT x = (std::max)(0.f, clickX - textOriginX);
+    FLOAT y = 8.f;
+    BOOL trailing = FALSE, inside = FALSE;
+    DWRITE_HIT_TEST_METRICS m{};
+    layout->HitTestPoint(x, y, &trailing, &inside, &m);
+    // `inside` is only about vertical position (always true for a single-line
+    // field); the caret index is decided by the trailing flag alone.
+    const int index = (int)m.textPosition + (trailing ? (int)m.length : 0);
+    return std::clamp(index, 0, (int)shown.size());
+}
+
+void UiApp::EditEnsureCaretVisible(float viewWidthDevicePx) {
+    const float caretX = EditCaretX(edit_.caret);
+    if (caretX - edit_.scroll > viewWidthDevicePx) edit_.scroll = caretX - viewWidthDevicePx;
+    if (caretX - edit_.scroll < 0) edit_.scroll = caretX;
+    if (edit_.scroll < 0) edit_.scroll = 0;
+}
+
+std::wstring* UiApp::FieldTarget(int id) {
+    switch (id) {
+        case ID_FIELD_KEY: return &keyText_;
+        case ID_FIELD_URL: return &urlText_;
+        case ID_FIELD_CHROMA: return &chromaText_;
+        case ID_FIELD_BROWSER: return &browserText_;
+        case ID_SCENE_NAME: return &sceneName_;
+        case ID_FIELD_BITRATE: return &bitrateText_;
+        case ID_FIELD_STREAMBITRATE: return &streamBitrateText_;
+        case ID_FIELD_TWITCHCID: return &twitchClientIdText_;
+        default: return nullptr;
+    }
+}
+
+void UiApp::AfterFieldEdit() {    // Field-specific cleanup, mirroring what a native edit control would enforce.
+    if (focus_ == ID_FIELD_CHROMA) {
+        std::wstring filtered;
+        for (wchar_t ch : chromaText_)
+            if (iswxdigit(ch) && filtered.size() < 6) filtered += (wchar_t)towupper(ch);
+        if (filtered != chromaText_) {
+            chromaText_ = filtered;
+            edit_.text = &chromaText_;
+            edit_.caret = (std::min)(edit_.caret, (int)chromaText_.size());
+            edit_.anchor = edit_.caret;
+        }
+    } else if (focus_ == ID_FIELD_BITRATE || focus_ == ID_FIELD_STREAMBITRATE) {
+        std::wstring* fld = focus_ == ID_FIELD_BITRATE ? &bitrateText_ : &streamBitrateText_;
+        std::wstring filtered;
+        for (wchar_t ch : *fld)
+            if (iswdigit(ch) && filtered.size() < 6) filtered += ch;
+        if (filtered != *fld) {
+            *fld = filtered;
+            edit_.text = fld;
+            edit_.caret = (std::min)(edit_.caret, (int)fld->size());
+            edit_.anchor = edit_.caret;
+        }
+    } else if (focus_ == ID_SCENE_NAME && !scenes_.empty()) {
+        scenes_[activeScene_].name = sceneName_;
+        SyncSettingsFromUi();
+        SaveUiSettings(settings_);  // renaming a scene persists immediately
+    }
+}
+
 void UiApp::Field(int id, const D2D1_RECT_F& r, std::wstring* text, bool password,
                   const wchar_t* placeholder) {
     hits_.push_back({id, r, true});
     fieldRects_[id] = r;
-    bool focused = focus_ == id;
+    const bool focused = focus_ == id;
+    if (focused && edit_.text != text) EditBind(text);
     auto rr = D2D1::RoundedRect(r, Px(8), Px(8));
     dc_->FillRoundedRectangle(rr, Br(kPanel));
     dc_->DrawRoundedRectangle(rr, Br(focused ? kAccent : kBorder), focused ? Px(1.5f) : Px(1));
 
     std::wstring shown = *text;
     if (password) shown.assign(shown.size(), L'\x2022');
+    const float pad = Px(12);
+    float scroll = 0.f;
+    if (focused) {
+        EditEnsureCaretVisible((r.right - r.left) - pad * 2);
+        scroll = edit_.scroll;
+    }
+
     dc_->PushAxisAlignedClip(r, D2D1_ANTIALIAS_MODE_ALIASED);
     if (shown.empty() && !focused) {
         Text(placeholder, fmtBody_, Inset(r, 12, 0), WithAlpha(kTextDim, 0.8f));
     } else {
-        Text(shown, fmtBody_, Inset(r, 12, 0), kText);
+        // selection highlight behind the text
+        if (focused && edit_.anchor != edit_.caret) {
+            const int lo = (std::min)(edit_.anchor, edit_.caret);
+            const int hi = (std::max)(edit_.anchor, edit_.caret);
+            const float x0 = r.left + pad + EditCaretX(lo) - scroll;
+            const float x1 = r.left + pad + EditCaretX(hi) - scroll;
+            dc_->FillRectangle(
+                D2D1::RectF(x0, r.top + Px(5), x1, r.bottom - Px(5)),
+                Br(WithAlpha(kAccent, 0.32f)));
+        }
+        const float originX = r.left + pad - scroll;
+        Text(shown, fmtBody_, D2D1::RectF(originX, r.top, originX + Px(2000), r.bottom), kText);
     }
     if (focused) {
-        // caret at the end of the text
-        ComPtr<IDWriteTextLayout> layout;
-        if (SUCCEEDED(dwrite_->CreateTextLayout(shown.c_str(), (UINT32)shown.size(), fmtBody_.Get(),
-                                                10000, r.bottom - r.top,
-                                                layout.GetAddressOf()))) {
-            DWRITE_TEXT_METRICS m{};
-            layout->GetMetrics(&m);
-            float x = r.left + Px(12) + m.widthIncludingTrailingWhitespace;
-            bool on = (GetTickCount64() / 500) % 2 == 0;
-            if (on)
-                dc_->FillRectangle(D2D1::RectF(x, r.top + Px(9), x + Px(1.5f), r.bottom - Px(9)),
-                                   Br(kAccent));
-        }
+        const float x = r.left + pad + EditCaretX(edit_.caret) - scroll;
+        const bool on = (GetTickCount64() / 500) % 2 == 0;
+        if (on)
+            dc_->FillRectangle(D2D1::RectF(x, r.top + Px(6), x + Px(1.5f), r.bottom - Px(6)),
+                               Br(kAccent));
     }
     dc_->PopAxisAlignedClip();
 }
@@ -1898,6 +2180,44 @@ void UiApp::HandleTwitchStateChange() {
     }
 }
 
+// Demo page for the "Test overlay" button: obviously live (moving bar), so one
+// click answers "does the browser overlay work?".
+static const char* kOverlayTestHtml = R"(<!doctype html><html><head><meta charset="utf-8">
+<style>
+html,body{margin:0;height:100%;background:transparent;font-family:'Segoe UI',sans-serif}
+.box{position:absolute;left:48px;top:48px;padding:20px 26px;border-radius:16px;
+background:rgba(22,16,32,.85);border:2px solid #A855F7;color:#fff;
+box-shadow:0 10px 40px rgba(0,0,0,.45)}
+h1{margin:0 0 8px;font-size:30px}p{margin:0;color:#cbb8ec;font-size:16px;line-height:1.4}
+.bar{position:absolute;left:48px;bottom:48px;width:440px;height:16px;border-radius:8px;
+background:rgba(255,255,255,.16);overflow:hidden}
+.bar i{display:block;height:100%;width:38%;border-radius:8px;background:#A855F7;
+animation:slide 2.4s ease-in-out infinite alternate}
+@keyframes slide{from{transform:translateX(0)}to{transform:translateX(268px)}}
+</style></head><body>
+<div class="box"><h1>Ulticast overlay test</h1>
+<p>If you can read this and the bar below is moving,<br>
+the browser overlay is working.<br>
+Replace the URL with your alerts, chat or widget page.</p></div>
+<div class="bar"><i></i></div>
+</body></html>
+)";
+
+void UiApp::EnsureBrowserSource() {
+    if (scenes_.empty()) return;
+    UiScene& sc = scenes_[activeScene_];
+    for (UiSource& s : sc.sources) {
+        if (s.type == SessionSourceType::Browser) {
+            s.enabled = true;
+            return;
+        }
+    }
+    UiSource b;
+    b.type = SessionSourceType::Browser;
+    b.enabled = true;
+    sc.sources.push_back(b);
+}
+
 void UiApp::MoveSource(int index, int delta) {
     if (scenes_.empty()) return;
     UiScene& sc = scenes_[activeScene_];
@@ -2202,10 +2522,20 @@ void UiApp::DrawSettingsPage() {
                &settings_.light);
         cy += pad + headH + rowH + pad + cardGap;
 
-        Card(x, cy, w, pad + headH + rowH + pad, L"BROWSER OVERLAY");
+        Card(x, cy, w, pad + headH + 2 * rowH + rowGap + pad, L"BROWSER OVERLAY");
         y = cy + pad + headH + 4;
         Field(ID_FIELD_BROWSER, S(x + pad, y, cw, rowH), &browserText_, false,
-              L"HTML file or https:// URL (add the source in a scene)");
+              L"HTML file or https:// URL (alerts, chat, widgets)");
+        y += rowH + rowGap;
+        Button(ID_BROWSER_TEST, S(x + pad, y, 150, rowH), L"Test overlay", BtnStyle::Ghost);
+        Button(ID_BROWSER_RELOAD, S(x + pad + 158, y, 100, rowH), L"Reload", BtnStyle::Ghost,
+               sessionRunning_ && !settings_.browserUrl.empty());
+        dc_->PushAxisAlignedClip(S(x + pad + 266, y, cw - 266, rowH),
+                                 D2D1_ANTIALIAS_MODE_ALIASED);
+        Text(browserStatus_.empty() ? L"not started" : browserStatus_, fmtSmall_,
+             S(x + pad + 266, y, cw - 266, rowH),
+             browserStatus_.rfind(L"load failed", 0) == 0 ? kRec : WithAlpha(kTextDim, 0.75f));
+        dc_->PopAxisAlignedClip();
     }
 
     // ---- right column: audio filters, encoder, behavior, misc
@@ -3152,6 +3482,31 @@ void UiApp::OnAction(int id) {
             openAction_ = (openAction_ == ID_ADD_SOURCE) ? 0 : ID_ADD_SOURCE;
             actionRect_ = addMenuRect_;
             break;
+        case ID_BROWSER_TEST: {
+            const std::string path = Diag::DataDir() + "\\overlay-test.html";
+            std::ofstream f(path);
+            if (f) {
+                f << kOverlayTestHtml;
+                f.close();
+                browserText_ = Widen(path);
+                EnsureBrowserSource();
+                SyncSettingsFromUi();
+                SaveUiSettings(settings_);
+                PushSceneSources();
+                RestartPreview();
+                statusText_ = L"Test overlay added — it should appear in the preview";
+                statusError_ = false;
+            } else {
+                statusText_ = L"Could not write the test page";
+                statusError_ = true;
+            }
+            break;
+        }
+        case ID_BROWSER_RELOAD:
+            session_.ReloadBrowser();
+            statusText_ = L"Overlay reloaded";
+            statusError_ = false;
+            break;
         case ID_TWITCH_CONNECT:
             StartTwitchConnect();
             break;
@@ -3462,6 +3817,18 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
             }
+            // dragging inside a focused text field extends the selection
+            if (press_ != 0 && press_ == focus_) {
+                auto it = fieldRects_.find(press_);
+                if (it != fieldRects_.end()) {
+                    if (std::wstring* t = FieldTarget(press_)) {
+                        if (edit_.text != t) EditBind(t);
+                        const float originX = it->second.left + Px(12) - edit_.scroll;
+                        EditMoveTo(EditCaretIndexFromX(originX, x), true);
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                    }
+                }
+            }
             return 0;
         }
         case WM_LBUTTONDOWN: {
@@ -3502,18 +3869,33 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             SetCapture(hwnd_);
 
-            // text fields: focus on click
+            // text fields: focus + caret placement (double-click selects a word)
             int newFocus = 0;
             for (int fid : {ID_FIELD_KEY, ID_FIELD_URL, ID_FIELD_CHROMA, ID_FIELD_BROWSER,
                             ID_SCENE_NAME, ID_FIELD_BITRATE, ID_FIELD_STREAMBITRATE,
                             ID_FIELD_TWITCHCID}) {
                 auto it = fieldRects_.find(fid);
-                if (it != fieldRects_.end() && x >= it->second.left && x < it->second.right &&
-                    y >= it->second.top && y < it->second.bottom)
-                    newFocus = fid;
+                if (it == fieldRects_.end()) continue;
+                if (x < it->second.left || x >= it->second.right || y < it->second.top ||
+                    y >= it->second.bottom)
+                    continue;
+                newFocus = fid;
+                if (std::wstring* t = FieldTarget(fid)) {
+                    EditBind(t);
+                    const float originX = it->second.left + Px(12) - edit_.scroll;
+                    const int idx = EditCaretIndexFromX(originX, x);
+                    const uint64_t now = GetTickCount64();
+                    if (edit_.lastClickField == fid && now - edit_.lastClickMs < 400)
+                        EditSelectWordAt(idx);  // double click
+                    else
+                        EditMoveTo(idx, false);
+                    edit_.lastClickField = fid;
+                    edit_.lastClickMs = now;
+                }
             }
             if (newFocus != focus_) {
                 focus_ = newFocus;
+                if (newFocus) edit_.scroll = 0;
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
 
@@ -3630,55 +4012,22 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_CHAR: {
             wchar_t c = (wchar_t)wp;
-            std::wstring* target = nullptr;
-            if (focus_ == ID_FIELD_KEY) target = &keyText_;
-            else if (focus_ == ID_FIELD_URL) target = &urlText_;
-            else if (focus_ == ID_FIELD_CHROMA) target = &chromaText_;
-            else if (focus_ == ID_FIELD_BROWSER) target = &browserText_;
-            else if (focus_ == ID_SCENE_NAME) target = &sceneName_;
-            else if (focus_ == ID_FIELD_BITRATE) target = &bitrateText_;
-            else if (focus_ == ID_FIELD_STREAMBITRATE) target = &streamBitrateText_;
-            else if (focus_ == ID_FIELD_TWITCHCID) target = &twitchClientIdText_;
+            std::wstring* target = FieldTarget(focus_);
             if (!target) return 0;
-            if (c == 8) {  // backspace
-                if (!target->empty()) target->pop_back();
-            } else if (c == 22) {  // Ctrl+V
-                if (OpenClipboard(hwnd)) {
-                    HANDLE h = GetClipboardData(CF_UNICODETEXT);
-                    if (h) {
-                        auto* text = (wchar_t*)GlobalLock(h);
-                        if (text) {
-                            *target += text;
-                            GlobalUnlock(h);
-                        }
-                    }
-                    CloseClipboard();
-                }
-                // Strip control characters: pasted keys/URLs often carry CR/LF.
-                target->erase(std::remove_if(target->begin(), target->end(),
-                                             [](wchar_t ch) { return ch < 32 || ch == 127; }),
-                              target->end());
-            } else if (c >= 32) {
-                *target += c;
-            }
-            if (focus_ == ID_FIELD_CHROMA) {
-                // keep it a clean 6-digit hex color
-                std::wstring filtered;
-                for (wchar_t ch : chromaText_)
-                    if (iswxdigit(ch) && filtered.size() < 6)
-                        filtered += (wchar_t)towupper(ch);
-                chromaText_ = filtered;
-            } else if (focus_ == ID_SCENE_NAME && !scenes_.empty()) {
-                scenes_[activeScene_].name = sceneName_;
-            } else if (focus_ == ID_FIELD_BITRATE || focus_ == ID_FIELD_STREAMBITRATE) {
-                // digits only
-                std::wstring* fld =
-                    focus_ == ID_FIELD_BITRATE ? &bitrateText_ : &streamBitrateText_;
-                std::wstring filtered;
-                for (wchar_t ch : *fld)
-                    if (iswdigit(ch) && filtered.size() < 6) filtered += ch;
-                *fld = filtered;
-            }
+            if (edit_.text != target) EditBind(target);
+            if (c == 1)
+                EditSelectAll();      // Ctrl+A
+            else if (c == 3)
+                EditCopy(false);      // Ctrl+C
+            else if (c == 24)
+                EditCopy(true);       // Ctrl+X
+            else if (c == 22)
+                EditPaste();          // Ctrl+V
+            else if (c >= 32)
+                EditInsert(c);
+            else
+                return 0;             // backspace/delete arrive as WM_KEYDOWN
+            AfterFieldEdit();
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
@@ -3687,8 +4036,32 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 openAction_ = 0;
                 openCombo_ = -1;
                 focus_ = 0;
+                edit_.text = nullptr;
                 InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
             }
+            std::wstring* target = FieldTarget(focus_);
+            if (!target) return 0;
+            if (edit_.text != target) EditBind(target);
+            const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            switch (wp) {
+                case VK_LEFT:
+                    if (ctrl) EditWordMove(-1, shift);
+                    else EditMove(-1, shift);
+                    break;
+                case VK_RIGHT:
+                    if (ctrl) EditWordMove(+1, shift);
+                    else EditMove(+1, shift);
+                    break;
+                case VK_HOME: EditHome(shift); break;
+                case VK_END: EditEnd(shift); break;
+                case VK_DELETE: EditDeleteForward(); break;
+                case VK_BACK: EditDeleteBack(); break;
+                default: return 0;
+            }
+            AfterFieldEdit();
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         case WM_HOTKEY:

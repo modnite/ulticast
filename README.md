@@ -110,6 +110,10 @@ Please attach `diagnostics-*.txt` and the newest log to
   fixed for odd sizes/resizes, and the popup/timer/browser-overlay fixes — released in v0.9.1
 - **Stage 14** "Show Cursor" now works on the default WGC backend too (it was hard-coded on there;
   only the DXGI path honoured the toggle). The smoke test covers both backends — released in v0.9.2
+- **Stage 15** text fields behave like native edit controls (caret by click, drag/double-click
+  selection, arrow/word/Home/End navigation, Shift selection, Ctrl+A/C/X/V, Backspace/Delete,
+  horizontal scrolling); browser overlay gets a **Test overlay** button, a **Reload** button and
+  **live load status** in the card, plus the Chromium log in diagnostics — released in v0.9.3
 - Next: on-hardware validation on the RTX 3080 rig
 
 ## The UI (Ulticast-ui.exe)
@@ -122,7 +126,7 @@ together (the same separation ShadowPlay/OBS users expect).
 |---|---|
 | **Record** | scenes + sources rail · live preview (stats overlaid) · **RECORDING** (path, codec, **container MKV/MP4**, **separate mic track**), **CLIPS** (replay toggle, buffer length, **clip hotkey picker F6–F12/Off**), **ENCODING** (CQ or CBR, preset, B-frames, lookahead, two-pass) · transport: **Start/Stop Recording**, Pause, Snap Clip, Open Folder |
 | **Stream** | scenes + sources rail · live preview · **PLATFORM** (Twitch / YouTube / Facebook / custom, stream key or RTMP URL, reconnect attempts, bitrate, H.264/HEVC) · **STREAM ENCODER** (own preset, B-frames, lookahead, two-pass — independent from recording) · **TWITCH ACCOUNT** (Connect once, key stays current) · transport: **Go Live / End Stream**, Pause, Snap Clip |
-| **Settings** | capture defaults (monitor, window, backend, fps, **GPU**), camera & audio (gains, chroma key; **devices are picked per source**), **audio filters** (noise gate, compressor, mic monitoring), **appearance** (8 accents + light/dark), browser overlay URL, behavior (idle preview, close to tray, **scene fade**), troubleshooting, about |
+| **Settings** | capture defaults (monitor, window, backend, fps, **GPU**), camera & audio (gains, chroma key; **devices are picked per source**), **audio filters** (noise gate, compressor, mic monitoring), **appearance** (8 accents + light/dark), browser overlay (**URL + Test overlay + Reload + live load status**), behavior (idle preview, close to tray, **scene fade**), troubleshooting, about |
 
 **Sources** (per scene, OBS-style — add with **+ Add**, click a row to configure it):
 
@@ -134,7 +138,7 @@ together (the same separation ShadowPlay/OBS users expect).
 | Video Capture Device | VID | **any camera or capture card** — Media Foundation first, with an automatic **DirectShow fallback** for virtual cameras MF cannot see (some NVIDIA Broadcast builds, Snap Camera); multiple devices can run at once, each with its own PiP corner or free position (drag it on the preview) |
 | Microphone | MIC | capture device |
 | Desktop Audio | SYS | output device (loopback) |
-| Browser Overlay | WEB | HTML file / https:// URL (set in Settings) |
+| Browser Overlay | WEB | HTML file / https:// URL — set it in Settings, or press **Test overlay** to add the source with a built-in demo page |
 
 - **Independent outputs**: Start Recording and Go Live are separate actions; either can start the
   session and the other can be switched on later without interrupting the first (recording and
@@ -165,6 +169,9 @@ together (the same separation ShadowPlay/OBS users expect).
 - **Dropped-frame + uptime indicators**, live activity strip, tray menu with the same actions.
 - **Settings** persist to `%APPDATA%\Ulticast\settings.ini`; the stream key is stored
   **DPAPI-encrypted** (per user, never plaintext).
+- **Text fields are real edit controls**: click to place the caret, drag to select, double-click a
+  word, Shift+arrows/Home/End to extend, Ctrl+arrows for word jumps, Ctrl+A/C/X/V, Backspace/Delete,
+  and the text scrolls sideways to keep the caret visible.
 
 ## Verified on the RTX 2060 test machine
 
@@ -176,6 +183,7 @@ together (the same separation ShadowPlay/OBS users expect).
 | Activity strip | engine log lines surfaced in the UI ("Recording started", file path) |
 | **Chroma key** | green window keyed to pure black at its pixels; control run unkeyed; unrelated pixels untouched |
 | **Browser overlay (CEF)** | HTML rendered offscreen by Chromium 150 and composited: red square, green text, and a 50% white band blended mathematically exactly over the desktop; transparent areas show through |
+| **Browser overlay (live site)** | a real HTTPS page (`https://example.com`) loaded in the offscreen browser and composited into the recording; the card reports `loaded (HTTP 200)`, and failures would report `load failed: …` |
 | **DXGI cursor** | cursor shape queried via GDI (works with a parked cursor, where duplication reports nothing); tip/body pixels verified at a known coordinate while everything around stays untouched |
 | Tray + hotkey | tray icon registered; F9 clip hotkey registered globally |
 | Settings persistence | `settings.ini` written and re-loaded on next launch |
@@ -208,10 +216,12 @@ produces the installer and portable zip on the Releases page. Two test harnesses
 - `tools/smoke-test.ps1` — end-to-end engine checks against real files and pixels (needs an NVIDIA
   GPU; run it locally): record/pause/RTMP/replay/dual output/browser overlay/noise gate/compressor/
   mic monitoring/DirectShow/window capture/cursor toggling on both backends.
-- `tools/ui-test.ps1` — UI click-through automation (13 checks): launches the app against a
-  throwaway profile, drives it with synthetic clicks at design coordinates, and asserts on pixels
-  and the persisted settings (pages, tab switching, accent swatches, theme repaint + persistence,
-  add-source menu open/close, hotkey picker, separate-mic-track toggle, scene fade, X-to-exit).
+- `tools/ui-test.ps1` — UI click-through automation (19 checks): launches the app against a
+  throwaway profile, drives it with synthetic clicks and key events at design coordinates, and
+  asserts on pixels and the persisted settings (pages, tab switching, accent swatches, theme repaint
+  + persistence, add-source menu open/close, **text editing** — Ctrl+A, typing at the caret,
+  Backspace, click-to-place-caret — **Test overlay wiring**, hotkey picker, separate-mic-track
+  toggle, scene fade, X-to-exit).
   Screenshots land in `test/ui/`. Runs on any machine with an interactive desktop — **GitHub-hosted
   Windows runners have no desktop, so the CI step reports SKIP there**; run it locally (or on a
   self-hosted runner) before releasing. CI still uploads the screenshots when it does run.

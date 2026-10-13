@@ -794,6 +794,8 @@ bool Session::InitPipeline(uint32_t w, uint32_t h, std::string* err) {
         std::string e2;
         int bw = cfg_.browserWidth > 0 ? cfg_.browserWidth : (int)w;
         int bh = cfg_.browserHeight > 0 ? cfg_.browserHeight : (int)h;
+        // Load status reaches the activity strip, so a blank overlay is never silent.
+        browser_.SetStatusFn([this](const std::string& m) { Log("[browser] %s", m.c_str()); });
         if (!browser_.Start(cfg_.browserUrl, bw, bh, &e2)) {
             Log("[browser] disabled: %s", e2.c_str());
         } else {

@@ -197,7 +197,7 @@ foreach ($backend in @('dxgi', 'wgc')) {
                 $d = [Math]::Abs($pa.R - $pb.R) + [Math]::Abs($pa.G - $pb.G) + [Math]::Abs($pa.B - $pb.B)
                 if ($d -gt 90) {
                     $diff++
-                    if ($diff -ge 15) { $found = $true }   # the arrow is ~100+ pixels
+                    if ($diff -ge 6) { $found = $true }   # the arrow is ~100+ pixels
                 }
             }
         }

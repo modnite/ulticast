@@ -127,6 +127,21 @@ function SettingValue([string]$key) {
     if (-not $line) { return $null }
     return $line.Line.Substring($key.Length + 1).Trim()
 }
+function SceneName() {
+    $v = SettingValue 'scene0'   # v2|<name>|cursor|sources
+    if (-not $v) { return $null }
+    $parts = $v.Split('|')
+    if ($parts.Count -lt 2) { return $null }
+    return $parts[1]
+}
+function TypeChar($hwnd, [int]$code) {
+    [UlticastUiTest]::PostMessage($hwnd, 0x0102, [IntPtr]$code, [IntPtr]1) | Out-Null
+    Start-Sleep -Milliseconds 80
+}
+function KeyDown($hwnd, [int]$vk) {
+    [UlticastUiTest]::PostMessage($hwnd, 0x0100, [IntPtr]$vk, [IntPtr]1) | Out-Null
+    Start-Sleep -Milliseconds 80
+}
 
 Write-Host "Ulticast UI automation" -ForegroundColor Cyan
 Write-Host "binary: $Exe"
@@ -208,6 +223,38 @@ Click $hwnd 600 30
 $closed = Shot $hwnd '08-add-menu-closed'
 $after = Sample $closed 150 230
 Check 'clicking away closes the menu' ((Dist $after $bg) -le 12) "after=$($after.r),$($after.g),$($after.b)"
+
+# ---------------------------------------------------------------- text edit --
+# The scene-name field must behave like a normal edit control: caret placement
+# on click, Ctrl+A, typing at the caret, backspace at the caret.
+Click $hwnd 284 27            # Record page
+Click $hwnd 120 147           # scene name field (design y = 130..164)
+TypeChar $hwnd 1              # Ctrl+A
+TypeChar $hwnd 0x5A           # Z
+TypeChar $hwnd 0x5A           # Z
+Check 'text field: Ctrl+A + typing replaces the text' ((SceneName) -eq 'ZZ') `
+      "name=$(SceneName)"
+KeyDown $hwnd 0x08            # backspace at the end
+Check 'text field: backspace deletes at the caret' ((SceneName) -eq 'Z') "name=$(SceneName)"
+Click $hwnd 32 147            # click at the left edge -> caret at position 0
+TypeChar $hwnd 0x41           # A
+Check 'text field: caret placement from the click' ((SceneName) -eq 'AZ') "name=$(SceneName)"
+TypeChar $hwnd 1              # Ctrl+A
+foreach ($ch in 'G', 'a', 'm', 'e') { TypeChar $hwnd ([int][char]$ch) }
+Check 'text field: name restored' ((SceneName) -eq 'Game') "name=$(SceneName)"
+
+# ---------------------------------------------------------------- browser ----
+# "Test overlay" must write the demo page, wire it into the active scene and
+# persist it -- one click answers "does the overlay work?".
+Click $hwnd 480 27            # Settings page
+Click $hwnd 105 580           # Test overlay
+$url = SettingValue 'browserUrl'
+Check 'browser overlay: Test overlay wires the demo page' `
+      ($url -ne $null -and $url.Contains('overlay-test.html')) "browserUrl=$url"
+$scene = SettingValue 'scene0'
+Check 'browser overlay: a Browser source is added to the scene' `
+      ($scene -ne $null -and $scene.Contains(';2:')) "scene0=$scene"
+Click $hwnd 284 27            # back to Record for the picker checks
 
 # ---------------------------------------------------------------- pickers ---
 Click $hwnd 708 482

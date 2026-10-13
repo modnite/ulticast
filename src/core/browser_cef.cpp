@@ -1,4 +1,5 @@
 #include "browser_cef.hpp"
+#include "diag.hpp"
 #include "log.hpp"
 
 #include <cstring>
@@ -10,6 +11,7 @@
 #include "include/cef_client.h"
 #include "include/cef_command_line.h"
 #include "include/cef_life_span_handler.h"
+#include "include/cef_load_handler.h"
 #include "include/cef_render_handler.h"
 
 // Shared delivery state: the browser closes asynchronously, so the paint
@@ -59,15 +61,21 @@ public:
     IMPLEMENT_REFCOUNTING(OverlayApp);
 };
 
+// Forward declaration: the client reports load status through this (defined
+// below, next to the sink that forwards it to the app log / activity strip).
+static void ReportStatus(const std::string& message);
+
 class OverlayClient : public CefClient,
                       public CefRenderHandler,
-                      public CefLifeSpanHandler {
+                      public CefLifeSpanHandler,
+                      public CefLoadHandler {
 public:
     std::function<void(const void*, int, int)> onFrame;
     int viewW = 1280, viewH = 720;
 
     CefRefPtr<CefRenderHandler> GetRenderHandler() override { return this; }
     CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
+    CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
 
     // CefRenderHandler
     void GetViewRect(CefRefPtr<CefBrowser>, CefRect& rect) override {
@@ -92,10 +100,39 @@ public:
         if (g_browser && g_browser.get() == browser.get()) g_browser = nullptr;
     }
 
+    // CefLoadHandler: report the outcome so a blank overlay is never silent.
+    void OnLoadEnd(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, int httpStatusCode) override {
+        if (frame && frame->IsMain()) ReportStatus("loaded (HTTP " + std::to_string(httpStatusCode) + ")");
+    }
+    void OnLoadError(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, ErrorCode errorCode,
+                     const CefString& errorText, const CefString& failedUrl) override {
+        if (!frame || !frame->IsMain()) return;
+        ReportStatus("load failed: " + errorText.ToString() + " (" + failedUrl.ToString() + ")");
+    }
+
     IMPLEMENT_REFCOUNTING(OverlayClient);
 };
 
+// Load-status sink: the session forwards it to the log/activity strip.
+static std::mutex g_statusMu;
+static std::function<void(const std::string&)> g_statusFn;
+
+static void ReportStatus(const std::string& message) {
+    Diag::Log("[browser] %s", message.c_str());
+    std::function<void(const std::string&)> fn;
+    {
+        std::lock_guard<std::mutex> lock(g_statusMu);
+        fn = g_statusFn;
+    }
+    if (fn) fn(message);
+}
+
 }  // namespace
+
+void BrowserOverlay::SetStatusFn(std::function<void(const std::string&)> fn) {
+    std::lock_guard<std::mutex> lock(g_statusMu);
+    g_statusFn = std::move(fn);
+}
 
 bool BrowserOverlay::RuntimePresent() {
     return GetFileAttributesW((ExeDir() + L"libcef.dll").c_str()) != INVALID_FILE_ATTRIBUTES;
@@ -145,7 +182,15 @@ bool BrowserOverlay::Start(const std::string& url, int width, int height, std::s
         settings.no_sandbox = true;
         settings.multi_threaded_message_loop = true;
         settings.windowless_rendering_enabled = true;
-        settings.log_severity = LOGSEVERITY_DISABLE;
+        // Keep Chromium's own log next to ours: overlay problems (network, TLS,
+        // page errors) then show up in diagnostics instead of failing silently.
+        settings.log_severity = LOGSEVERITY_INFO;
+        std::wstring cefLog = Widen(Diag::LogDir() + "\\cef.log");
+        std::error_code ec;
+        if (std::filesystem::exists(cefLog, ec) &&
+            std::filesystem::file_size(cefLog, ec) > 5u * 1024 * 1024)
+            std::filesystem::remove(cefLog, ec);  // INFO logging must not grow forever
+        CefString(&settings.log_file) = cefLog;
         std::wstring cache = ExeDir() + L"cef-cache";
         CefString(&settings.root_cache_path) = cache;
         g_app = new OverlayApp();
@@ -184,6 +229,14 @@ bool BrowserOverlay::Start(const std::string& url, int width, int height, std::s
 
     started_ = true;
     return true;
+}
+
+void BrowserOverlay::Reload() {
+    std::lock_guard<std::mutex> lock(g_mu);
+    if (g_browser) {
+        g_browser->Reload();
+        ReportStatus("reloading");
+    }
 }
 
 void BrowserOverlay::Stop() {

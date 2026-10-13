@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -25,9 +26,13 @@ public:
     static int ExecuteSubprocess(void* instance);
     static bool RuntimePresent();  // libcef.dll next to the executable?
     static void ShutdownGlobal();
+    // Load status ("loaded (HTTP 200)" / "load failed: ...") -> log + UI strip.
+    static void SetStatusFn(std::function<void(const std::string&)> fn);
 
     bool Start(const std::string& url, int width, int height, std::string* err);
     void Stop();
+    // Force a reload (useful when a page failed to load or needs refreshing).
+    void Reload();
 
     // Latest painted frame (packed BGRA, top-left origin). frameNo increments
     // when a new frame is available.

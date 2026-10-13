@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "capture_wgc.hpp"
+#include "browser_cef.hpp"
 #include "d3d.hpp"
 #include "log.hpp"
 #include "wasapi_capture.hpp"
@@ -190,6 +191,10 @@ std::string BuildReport() {
     std::string nvenc = FileVersion(std::wstring(sysdir) + L"\\nvEncodeAPI64.dll");
     if (nvenc.empty()) nvenc = FileVersion(Widen(ExeDir()) + L"nvEncodeAPI64.dll");
     s += "NVENC API  : " + (nvenc.empty() ? "(driver DLL not found)" : nvenc) + "\n";
+    s += std::string("CEF runtime: ") +
+         (BrowserOverlay::RuntimePresent() ? "libcef.dll found (browser overlay available)"
+                                           : "libcef.dll MISSING (browser overlay unavailable)") +
+         "\n";
 
     s += "\nMonitors:\n";
     for (auto& m : WgcCapture::ListMonitors()) {

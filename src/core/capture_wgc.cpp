@@ -81,7 +81,8 @@ static bool ContainsNoCase(const std::wstring& hay, const std::wstring& needle) 
 
 // ---- start -----------------------------------------------------------------
 
-bool WgcCapture::StartMonitor(int index, ID3D11Device* device, FrameCallback cb, std::string* err) {
+bool WgcCapture::StartMonitor(int index, ID3D11Device* device, FrameCallback cb, std::string* err,
+                              bool cursor) {
     auto monitors = ListMonitors();
     if (index < 0 || index >= (int)monitors.size()) {
         *err = "monitor index out of range";
@@ -94,7 +95,7 @@ bool WgcCapture::StartMonitor(int index, ID3D11Device* device, FrameCallback cb,
         winrt::check_hresult(interop->CreateForMonitor(monitors[index].handle,
                                                        winrt::guid_of<wgc::GraphicsCaptureItem>(),
                                                        winrt::put_abi(item)));
-        return StartItem(item, device, std::move(cb), err);
+        return StartItem(item, device, std::move(cb), err, cursor);
     } catch (winrt::hresult_error const& e) {
         *err = "CreateForMonitor: " + winrt::to_string(e.message());
         return false;
@@ -102,7 +103,7 @@ bool WgcCapture::StartMonitor(int index, ID3D11Device* device, FrameCallback cb,
 }
 
 bool WgcCapture::StartWindow(const std::wstring& titleSubstr, ID3D11Device* device,
-                             FrameCallback cb, std::string* err) {
+                             FrameCallback cb, std::string* err, bool cursor) {
     std::vector<HWND> hwnds;
     EnumWindows(WindowProc, reinterpret_cast<LPARAM>(&hwnds));
     HWND target = nullptr;
@@ -133,7 +134,7 @@ bool WgcCapture::StartWindow(const std::wstring& titleSubstr, ID3D11Device* devi
         winrt::check_hresult(interop->CreateForWindow(target,
                                                       winrt::guid_of<wgc::GraphicsCaptureItem>(),
                                                       winrt::put_abi(item)));
-        return StartItem(item, device, std::move(cb), err);
+        return StartItem(item, device, std::move(cb), err, cursor);
     } catch (winrt::hresult_error const& e) {
         *err = "CreateForWindow: " + winrt::to_string(e.message());
         return false;
@@ -141,7 +142,7 @@ bool WgcCapture::StartWindow(const std::wstring& titleSubstr, ID3D11Device* devi
 }
 
 bool WgcCapture::StartItem(wgc::GraphicsCaptureItem const& item, ID3D11Device* device,
-                           FrameCallback cb, std::string* err) {
+                           FrameCallback cb, std::string* err, bool cursor) {
     try {
         ComPtr<IDXGIDevice> dxgi;
         winrt::check_hresult(device->QueryInterface(__uuidof(IDXGIDevice),
@@ -157,7 +158,7 @@ bool WgcCapture::StartItem(wgc::GraphicsCaptureItem const& item, ID3D11Device* d
         impl->pool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(
             rtDevice, wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
         impl->session = impl->pool.CreateCaptureSession(item);
-        impl->session.IsCursorCaptureEnabled(true);
+        impl->session.IsCursorCaptureEnabled(cursor);
         try {
             impl->session.IsBorderRequired(false);  // Windows 11+; throws on Win10
         } catch (...) {
@@ -205,6 +206,15 @@ bool WgcCapture::StartItem(wgc::GraphicsCaptureItem const& item, ID3D11Device* d
     } catch (winrt::hresult_error const& e) {
         *err = "capture setup: " + winrt::to_string(e.message());
         return false;
+    }
+}
+
+void WgcCapture::SetCursorEnabled(bool on) {
+    if (!impl_ || !impl_->session) return;
+    try {
+        impl_->session.IsCursorCaptureEnabled(on);
+    } catch (...) {
+        // Older Windows 10 builds do not allow changing it while capturing.
     }
 }
 

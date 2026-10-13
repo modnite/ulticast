@@ -108,6 +108,8 @@ Please attach `diagnostics-*.txt` and the newest log to
   mic track, source z-order chevrons, 250 ms scene crossfade, per-output encoder settings
   (record vs stream), per-source device selection (Settings combos removed), window capture
   fixed for odd sizes/resizes, and the popup/timer/browser-overlay fixes — released in v0.9.1
+- **Stage 14** "Show Cursor" now works on the default WGC backend too (it was hard-coded on there;
+  only the DXGI path honoured the toggle). The smoke test covers both backends — released in v0.9.2
 - Next: on-hardware validation on the RTX 3080 rig
 
 ## The UI (Ulticast-ui.exe)

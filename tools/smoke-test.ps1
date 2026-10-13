@@ -171,40 +171,42 @@ if (ExtractFrame "$t\wincap.mkv" 2 "$t\wincap.png") {
 if ($np -and -not $np.HasExited) { Stop-Process -Id $np.Id -Force }
 
 # --------------------------------------------------------------- 11. cursor
-# Park the cursor, then capture the same desktop twice *concurrently* (one run
-# with cursor compositing, one without). Because both captures happen at the
-# same wall-clock time, the desktop content is identical and the only pixel
-# difference is the cursor -- no fragile white-pixel hunting, and it does not
-# matter where the pointer actually ends up.
+# The scene "Show Cursor" toggle must reach *both* capture backends: DXGI
+# composites the cursor ourselves, WGC bakes it into the frame. Capture the same
+# desktop twice concurrently (one with, one without) so the cursor is the only
+# difference. (Both captures run at the same wall-clock time, so desktop content
+# changes cannot mask the result -- and it does not matter where the pointer is.)
 [Smoke]::SetCursorPos(600, 400) | Out-Null
 Start-Sleep -Milliseconds 300
-$p1 = Start-Process -FilePath $exe -ArgumentList "--backend dxgi --monitor 0 --seconds 5 --out `"$t\cursor.mkv`"" -PassThru -NoNewWindow
-Start-Sleep -Milliseconds 400
-$p2 = Start-Process -FilePath $exe -ArgumentList "--backend dxgi --monitor 0 --seconds 5 --no-cursor --out `"$t\nocursor.mkv`"" -PassThru -NoNewWindow
-$p1.WaitForExit()
-$p2.WaitForExit()
-if ((ExtractFrame "$t\cursor.mkv" 2 "$t\cursor.png") -and
-    (ExtractFrame "$t\nocursor.mkv" 2 "$t\nocursor.png")) {
-    $a = New-Object System.Drawing.Bitmap "$t\cursor.png"
-    $b = New-Object System.Drawing.Bitmap "$t\nocursor.png"
-    $found = $false
-    $diff = 0
-    for ($y = 0; $y -lt $a.Height -and -not $found; $y += 2) {
-        for ($x = 0; $x -lt $a.Width -and -not $found; $x += 2) {
-            $pa = $a.GetPixel($x, $y)
-            $pb = $b.GetPixel($x, $y)
-            $d = [Math]::Abs($pa.R - $pb.R) + [Math]::Abs($pa.G - $pb.G) + [Math]::Abs($pa.B - $pb.B)
-            if ($d -gt 90) {
-                $diff++
-                if ($diff -ge 15) { $found = $true }   # the arrow is ~100+ pixels
+foreach ($backend in @('dxgi', 'wgc')) {
+    $a = Start-Process -FilePath $exe -ArgumentList "--backend $backend --monitor 0 --seconds 5 --out `"$t\cursor-$backend.mkv`"" -PassThru -NoNewWindow
+    Start-Sleep -Milliseconds 400
+    $b = Start-Process -FilePath $exe -ArgumentList "--backend $backend --monitor 0 --seconds 5 --no-cursor --out `"$t\nocursor-$backend.mkv`"" -PassThru -NoNewWindow
+    $a.WaitForExit()
+    $b.WaitForExit()
+    if ((ExtractFrame "$t\cursor-$backend.mkv" 2 "$t\cursor-$backend.png") -and
+        (ExtractFrame "$t\nocursor-$backend.mkv" 2 "$t\nocursor-$backend.png")) {
+        $ia = New-Object System.Drawing.Bitmap "$t\cursor-$backend.png"
+        $ib = New-Object System.Drawing.Bitmap "$t\nocursor-$backend.png"
+        $found = $false
+        $diff = 0
+        for ($y = 0; $y -lt $ia.Height -and -not $found; $y += 2) {
+            for ($x = 0; $x -lt $ia.Width -and -not $found; $x += 2) {
+                $pa = $ia.GetPixel($x, $y)
+                $pb = $ib.GetPixel($x, $y)
+                $d = [Math]::Abs($pa.R - $pb.R) + [Math]::Abs($pa.G - $pb.G) + [Math]::Abs($pa.B - $pb.B)
+                if ($d -gt 90) {
+                    $diff++
+                    if ($diff -ge 15) { $found = $true }   # the arrow is ~100+ pixels
+                }
             }
         }
+        $ia.Dispose()
+        $ib.Dispose()
+        Check "$backend cursor: toggle changes the captured frame" $found "diffpixels=$diff"
+    } else {
+        Check "$backend cursor: toggle changes the captured frame" $false 'frame extraction failed'
     }
-    $a.Dispose()
-    $b.Dispose()
-    Check 'dxgi cursor: arrow composited (concurrent captures, only the cursor differs)' $found "diffpixels=$diff"
-} else {
-    Check 'dxgi cursor: arrow composited (concurrent captures, only the cursor differs)' $false 'frame extraction failed'
 }
 
 # ------------------------------------------------------------------ summary

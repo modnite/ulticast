@@ -25,16 +25,20 @@ public:
     static std::vector<MonitorInfo> ListMonitors();
     static std::vector<std::wstring> ListWindows();
 
-    bool StartMonitor(int index, ID3D11Device* device, FrameCallback cb, std::string* err);
+    bool StartMonitor(int index, ID3D11Device* device, FrameCallback cb, std::string* err,
+                      bool cursor = true);
     bool StartWindow(const std::wstring& titleSubstr, ID3D11Device* device, FrameCallback cb,
-                     std::string* err);
+                     std::string* err, bool cursor = true);
+    // WGC draws the cursor into the frame itself, so "show cursor" has to be
+    // toggled on the capture session (works while capturing).
+    void SetCursorEnabled(bool on);
     void Stop();
 
     std::atomic<uint64_t> frameCount{0};
 
 private:
     bool StartItem(winrt::Windows::Graphics::Capture::GraphicsCaptureItem const& item,
-                   ID3D11Device* device, FrameCallback cb, std::string* err);
+                   ID3D11Device* device, FrameCallback cb, std::string* err, bool cursor);
 
     struct Impl;
     std::shared_ptr<Impl> impl_;

@@ -158,13 +158,13 @@ bool Session::Start(const SessionConfig& cfg, std::string* err) {
 
     if (!cfg_.window.empty()) {
         usingDxgi_ = false;
-        if (!cap_.StartWindow(cfg_.window, d3d_.device.Get(), cb, err)) {
+        if (!cap_.StartWindow(cfg_.window, d3d_.device.Get(), cb, err, cfg_.showCursor)) {
             Stop();
             return false;
         }
     } else if (backend == "wgc") {
         usingDxgi_ = false;
-        if (!cap_.StartMonitor(cfg_.monitor, d3d_.device.Get(), cb, err)) {
+        if (!cap_.StartMonitor(cfg_.monitor, d3d_.device.Get(), cb, err, cfg_.showCursor)) {
             Stop();
             return false;
         }
@@ -178,7 +178,7 @@ bool Session::Start(const SessionConfig& cfg, std::string* err) {
             }
             Log("[capture] DXGI unavailable (%s); falling back to WGC", err->c_str());
             usingDxgi_ = false;
-            if (!cap_.StartMonitor(cfg_.monitor, d3d_.device.Get(), cb, err)) {
+            if (!cap_.StartMonitor(cfg_.monitor, d3d_.device.Get(), cb, err, cfg_.showCursor)) {
                 Stop();
                 return false;
             }
@@ -377,8 +377,10 @@ void Session::StartExtraCaptures() {
         };
         std::string err;
         const bool ok = !e->window.empty()
-                            ? e->cap->StartWindow(e->window, d3d_.device.Get(), cb, &err)
-                            : e->cap->StartMonitor(e->monitor, d3d_.device.Get(), cb, &err);
+                            ? e->cap->StartWindow(e->window, d3d_.device.Get(), cb, &err,
+                                                  cfg_.showCursor)
+                            : e->cap->StartMonitor(e->monitor, d3d_.device.Get(), cb, &err,
+                                                   cfg_.showCursor);
         if (!ok) {
             Log("[capture] extra layer failed: %s", err.c_str());
             continue;
@@ -397,6 +399,13 @@ void Session::StopExtraCaptures() {
         e->srv.Reset();
     }
     extraCaps_.clear();
+}
+
+void Session::SetCursorVisible(bool on) {
+    showCursorLive_.store(on);
+    cap_.SetCursorEnabled(on);
+    for (auto& e : extraCaps_)
+        if (e->cap) e->cap->SetCursorEnabled(on);
 }
 
 void Session::ApplyOutputCommands() {

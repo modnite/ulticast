@@ -159,7 +159,9 @@ public:
     // Live scene updates, safe to call while running (UI scene switching).
     // webcamPos applies to video sources that use the default PiP placement.
     void SetSources(std::vector<SessionSource> sources, std::string webcamPos);
-    void SetCursorVisible(bool on) { showCursorLive_.store(on); }
+    // Show/hide the cursor: DXGI composites it ourselves, WGC draws it into the
+    // frame, so both paths are toggled here.
+    void SetCursorVisible(bool on);
     // Mute/unmute the audio sources at runtime (scene audio sources).
     void SetAudioSourcesLive(bool desktop, bool mic) { mixer_.SetLiveSources(desktop, mic); }
     // Mic noise gate (threshold in dBFS); safe to call while running.

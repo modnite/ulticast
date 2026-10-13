@@ -201,8 +201,15 @@ Produces `ulticast.exe` (CLI) and `ulticast-ui.exe` (GUI) in `build/Release`.
 and nv-codec-headers into `third_party/` (git-ignored).
 
 CI (`.github/workflows/build.yml`) builds on a Windows runner for every push; pushing a `v*` tag
-produces the installer and portable zip on the Releases page. `tools/smoke-test.ps1` is the local
-end-to-end test (requires an NVIDIA GPU).
+produces the installer and portable zip on the Releases page. Two test harnesses run there too:
+
+- `tools/smoke-test.ps1` — end-to-end engine checks against real files and pixels (needs an NVIDIA
+  GPU; run it locally): record/pause/RTMP/replay/dual output/browser overlay/noise gate/compressor/
+  mic monitoring/DirectShow/window capture/cursor toggling on both backends.
+- `tools/ui-test.ps1` — UI click-through automation (runs anywhere, including CI): launches the app
+  against a throwaway profile, drives it with synthetic clicks at design coordinates, and asserts on
+  pixels and the persisted settings (pages, popups, hotkey picker, container, toggles, themes,
+  persistence, X-to-exit). Screenshots land in `test/ui/` and are uploaded as a CI artifact.
 
 ## CLI
 

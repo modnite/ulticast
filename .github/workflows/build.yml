@@ -67,6 +67,18 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "signing failed: $f" }
           }
 
+      - name: UI automation (click-through checks)
+        shell: pwsh
+        run: ./tools/ui-test.ps1
+
+      - name: Upload UI screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots
+          path: test/ui/*.png
+          if-no-files-found: ignore
+
       - name: Build installer
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh

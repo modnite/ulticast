@@ -181,6 +181,8 @@ together (the same separation ShadowPlay/OBS users expect).
 | Settings persistence | `settings.ini` written and re-loaded on next launch |
 | Engine regressions (CLI) | pause (8 s → 6 s media), webcam + replay + audio combo, RTMP round-trip |
 | **Dual output** | H.264 → RTMP and HEVC → disk simultaneously, both ~5.95 s |
+| **Twitch account linking** | device-code OAuth completed with a real Twitch account — channel + stream key fetched automatically, token stored DPAPI-encrypted |
+| **Twitch live stream** | went live successfully from Ulticast (H.264 CBR → `rtmp://live.twitch.tv/app`) |
 | Footprint | 34% of one core / 116 MB with webcam + replay + recording + audio |
 
 ## Build from source

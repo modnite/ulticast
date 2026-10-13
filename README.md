@@ -206,10 +206,13 @@ produces the installer and portable zip on the Releases page. Two test harnesses
 - `tools/smoke-test.ps1` — end-to-end engine checks against real files and pixels (needs an NVIDIA
   GPU; run it locally): record/pause/RTMP/replay/dual output/browser overlay/noise gate/compressor/
   mic monitoring/DirectShow/window capture/cursor toggling on both backends.
-- `tools/ui-test.ps1` — UI click-through automation (runs anywhere, including CI): launches the app
-  against a throwaway profile, drives it with synthetic clicks at design coordinates, and asserts on
-  pixels and the persisted settings (pages, popups, hotkey picker, container, toggles, themes,
-  persistence, X-to-exit). Screenshots land in `test/ui/` and are uploaded as a CI artifact.
+- `tools/ui-test.ps1` — UI click-through automation (13 checks): launches the app against a
+  throwaway profile, drives it with synthetic clicks at design coordinates, and asserts on pixels
+  and the persisted settings (pages, tab switching, accent swatches, theme repaint + persistence,
+  add-source menu open/close, hotkey picker, separate-mic-track toggle, scene fade, X-to-exit).
+  Screenshots land in `test/ui/`. Runs on any machine with an interactive desktop — **GitHub-hosted
+  Windows runners have no desktop, so the CI step reports SKIP there**; run it locally (or on a
+  self-hosted runner) before releasing. CI still uploads the screenshots when it does run.
 
 ## CLI
 

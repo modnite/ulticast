@@ -67,6 +67,7 @@ struct Options {
     int adapter = -1;
     std::string backend = "auto";
     std::wstring window;
+    bool windowSource = false;  // --window given: a window must be matched
     std::string out;
     double seconds = 10.0;
     uint32_t fps = 60;
@@ -215,7 +216,12 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == L"--monitor") takeInt(o.monitor);
         else if (a == L"--adapter") takeInt(o.adapter);
         else if (a == L"--backend") takeS(o.backend);
-        else if (a == L"--window") takeNext(o.window);
+        else if (a == L"--window") {
+            takeNext(o.window);
+            // Explicit window capture: an empty title must fail instead of
+            // quietly capturing the whole monitor.
+            o.windowSource = true;
+        }
         else if (a == L"--out") takeS(o.out);
         else if (a == L"--seconds") takeD(o.seconds);
         else if (a == L"--fps") takeU32(o.fps);
@@ -470,6 +476,7 @@ int wmain(int argc, wchar_t** argv) {
     SessionConfig cfg;
     cfg.monitor = o.monitor;
     cfg.window = o.window;
+    cfg.windowSource = o.windowSource;
     cfg.backend = o.backend;
     cfg.fps = o.fps;
     cfg.adapter = o.adapter;

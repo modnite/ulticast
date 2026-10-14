@@ -123,6 +123,14 @@ Please attach `diagnostics-*.txt` and the newest log to
   exists** (it used to linger as a ghost); the browser overlay is tracked by browser id, so Exit no
   longer waits on CEF; and X with "Close to tray" explains itself with a one-time tray notice —
   released in v0.9.4
+- **Stage 17** a focused UI pass: **sources never assume a target** — a Window source asks which
+  window before it exists (and the engine refuses to start one without a window instead of quietly
+  capturing the whole monitor), Display/Game ask when there is more than one monitor, and camera /
+  mic / desktop-audio sources open their device list immediately; **keyboard access** — Tab /
+  Shift+Tab move a focus ring through every control, Enter/Space activate, arrows drive popups and
+  sliders; Record and Stream lost their third card (the encoders moved to **Settings > Encoding**);
+  labels are ellipsized instead of clipped; the window cannot be shrunk below a readable size —
+  released in v0.9.5
 - Next: on-hardware validation on the RTX 3080 rig
 
 ## The UI (Ulticast-ui.exe)
@@ -135,14 +143,14 @@ together (the same separation ShadowPlay/OBS users expect).
 |---|---|
 | **Record** | scenes + sources rail · live preview (stats overlaid) · **RECORDING** (path, codec, **container MKV/MP4**, **separate mic track**), **CLIPS** (replay toggle, buffer length, **clip hotkey picker F6–F12/Off**), **ENCODING** (CQ or CBR, preset, B-frames, lookahead, two-pass) · transport: **Start/Stop Recording**, Pause, Snap Clip, Open Folder |
 | **Stream** | scenes + sources rail · live preview · **PLATFORM** (Twitch / YouTube / Facebook / custom, stream key or RTMP URL, reconnect attempts, bitrate, H.264/HEVC) · **STREAM ENCODER** (own preset, B-frames, lookahead, two-pass — independent from recording) · **TWITCH ACCOUNT** (Connect once, key stays current) · transport: **Go Live / End Stream**, Pause, Snap Clip |
-| **Settings** | **category rail** — Capture / Camera & Audio / Filters / Appearance / Browser / Behavior / Help / About — with a **live preview** beside it: capture defaults (monitor, window, backend, fps, **GPU**), camera & audio (gains, chroma key; **devices are picked per source**), **mic filters** (**presets** + noise gate, compressor, mic monitoring), **appearance** (8 accents + light/dark), browser overlay (**URL + Test overlay + Reload + live load status**), behavior (idle preview, close to tray, **scene fade**), **shortcuts**, troubleshooting, about |
+| **Settings** | **category rail** — Capture / Camera & Audio / Filters / Appearance / Browser / Behavior / **Encoding** / Help / About — with a **live preview** beside it: capture defaults (monitor, window, backend, fps, **GPU**), camera & audio (gains, chroma key; **devices are picked per source**), **mic filters** (**presets** + noise gate, compressor, mic monitoring), **appearance** (8 accents + light/dark + theme sample), browser overlay (**URL + Test overlay + Reload + live load status**), behavior (idle preview, close to tray, **scene fade**), **record/stream encoders** (CQ or CBR, preset, B-frames, lookahead, two-pass), **shortcuts**, troubleshooting, about |
 
 **Sources** (per scene, OBS-style — add with **+ Add**, click a row to configure it):
 
 | Type | Tag | Options |
 |---|---|---|
 | Display Capture | DISP | monitor — **add more than one to layer a second monitor as a PiP** |
-| Window Capture | WIN | window picker (scrollable list) — also works as a PiP layer |
+| Window Capture | WIN | **asks which window before the source is created** — a window source never falls back to the whole display |
 | Game Capture | GAME | monitor + DXGI duplication (fullscreen games, first capture) |
 | Video Capture Device | VID | **any camera or capture card** — Media Foundation first, with an automatic **DirectShow fallback** for virtual cameras MF cannot see (some NVIDIA Broadcast builds, Snap Camera); multiple devices can run at once, each with its own PiP corner or free position (drag it on the preview) |
 | Microphone | MIC | capture device |
@@ -185,6 +193,16 @@ together (the same separation ShadowPlay/OBS users expect).
 - **Settings you can see the effect of**: the page is split into categories and keeps the **live
   preview** on screen, so camera, chroma and audio changes are judged while you make them (the
   VLC-redesign lesson: never hide the picture while tweaking).
+- **Keyboard access**: Tab / Shift+Tab move a focus ring through every control on the page,
+  Enter/Space activate the focused one, arrows drive open popups and adjust focused sliders, and
+  Esc closes menus or leaves a text box. Clicking a control focuses it too, so the keyboard takes
+  over where the mouse left off. (No screen-reader support: the UI is a custom Direct2D canvas.)
+- **Sources never assume a target**: adding a Window source asks which window first, Display/Game
+  ask when more than one monitor is attached, and camera / mic / desktop-audio sources open their
+  device list immediately. A window source without a window refuses to start rather than capturing
+  a monitor.
+- **Labels never clip mid-character**: long source names are ellipsized, and the window cannot be
+  resized below a readable scale (85% of the design).
 
 ## Verified on the RTX 2060 test machine
 
@@ -200,6 +218,8 @@ together (the same separation ShadowPlay/OBS users expect).
 | **DXGI cursor** | cursor shape queried via GDI (works with a parked cursor, where duplication reports nothing); tip/body pixels verified at a known coordinate while everything around stays untouched |
 | Tray + hotkey | tray icon registered; F9 clip hotkey registered globally |
 | **Tray & exit** | the icon is removed while the window still exists (no ghost in the notification area); with the browser overlay live, tray **Exit** quits in ~0.3 s; X with "Close to tray" hides the window and shows a one-time tray notice |
+| **Window source guard** | a window source with no window refuses to start ("window source has no window selected") instead of capturing the monitor — asserted in the UI harness against a crafted scene |
+| **Keyboard navigation** | Tab/Shift+Tab focus ring, Enter/Space activation, arrows on popups and sliders — asserted by the UI harness (pixel + settings checks) |
 | Settings persistence | `settings.ini` written and re-loaded on next launch |
 | Engine regressions (CLI) | pause (8 s → 6 s media), webcam + replay + audio combo, RTMP round-trip |
 | **Dual output** | H.264 → RTMP and HEVC → disk simultaneously, both ~5.95 s |
@@ -230,13 +250,14 @@ produces the installer and portable zip on the Releases page. Two test harnesses
 - `tools/smoke-test.ps1` — end-to-end engine checks against real files and pixels (needs an NVIDIA
   GPU; run it locally): record/pause/RTMP/replay/dual output/browser overlay/noise gate/compressor/
   mic monitoring/DirectShow/window capture/cursor toggling on both backends.
-- `tools/ui-test.ps1` — UI click-through automation (26 checks): launches the app against a
+- `tools/ui-test.ps1` — UI click-through automation (33 checks): launches the app against a
   throwaway profile, drives it with synthetic clicks and key events at design coordinates, and
   asserts on pixels and the persisted settings (pages, tab switching, accent swatches, theme repaint
   + persistence, add-source menu open/close, **text editing** — Ctrl+A, typing at the caret,
   Backspace, click-to-place-caret — **settings categories**, **live preview**, **mic presets**,
-  **Test overlay wiring**, hotkey picker, separate-mic-track toggle, scene fade, **Close to tray /
-  tray Exit with the overlay live**, X-to-exit).
+  **window-source target prompt**, **keyboard navigation** (Tab + Enter, Space on a switch, arrows
+  on a slider), **Test overlay wiring**, hotkey picker, separate-mic-track toggle, scene fade,
+  **Close to tray / tray Exit with the overlay live**, X-to-exit).
   Screenshots land in `test/ui/`. Runs on any machine with an interactive desktop — **GitHub-hosted
   Windows runners have no desktop, so the CI step reports SKIP there**; run it locally (or on a
   self-hosted runner) before releasing. CI still uploads the screenshots when it does run.

@@ -247,7 +247,7 @@ Check 'text field: Ctrl+A + typing replaces the text' ((SceneName) -eq 'ZZ') `
       "name=$(SceneName)"
 KeyDown $hwnd 0x08            # backspace at the end
 Check 'text field: backspace deletes at the caret' ((SceneName) -eq 'Z') "name=$(SceneName)"
-Click $hwnd 32 147            # click at the left edge -> caret at position 0
+Click $hwnd 72 147            # click near the left edge -> caret at position 0
 TypeChar $hwnd 0x41           # A
 Check 'text field: caret placement from the click' ((SceneName) -eq 'AZ') "name=$(SceneName)"
 TypeChar $hwnd 1              # Ctrl+A
@@ -301,10 +301,34 @@ Check 'mic preset: Off disables both' ((SettingValue 'micGate') -eq '0') `
 
 Click $hwnd 284 27            # back to Record for the picker checks
 
+# ------------------------------------------------------------- source picks --
+# A window source must ask which window: nothing is added before a choice, and
+# the picker never offers "the whole monitor" as if it were a window.
+Start-Process notepad | Out-Null
+Start-Sleep -Milliseconds 900
+$before = SettingValue 'scene0'
+Click $hwnd 258 193           # + Add
+Click $hwnd 258 264           # "Window Capture"
+Start-Sleep -Milliseconds 500
+$pending = SettingValue 'scene0'
+Check 'window source: nothing added before a window is chosen' ($pending -eq $before) `
+      "before=$before after=$pending"
+Shot $hwnd '13-window-picker' | Out-Null
+Click $hwnd 258 230           # first window in the picker
+Start-Sleep -Milliseconds 700
+$after = SettingValue 'scene0'
+Check 'window source: choosing a window adds a WIN source' `
+      ($after -ne $null -and $after.Contains(';5:')) "scene0=$after"
+Get-Process notepad -ErrorAction SilentlyContinue | Stop-Process -Force
+
 # ---------------------------------------------------------------- pickers ---
-Click $hwnd 708 482
-Start-Sleep -Milliseconds 200
-Click $hwnd 708 343
+# CLIPS card now spans 684..1040 on Record: the clip-key combo is at x 760..1030.
+Click $hwnd 895 482
+Start-Sleep -Milliseconds 250
+$hotkeyOpen = Shot $hwnd '14-hotkey-picker'
+Check 'clip hotkey picker opens' ((Dist (Sample $hotkeyOpen 895 300) (Sample $hotkeyOpen 895 600)) -gt 20) `
+      'no picker drawn'
+Click $hwnd 895 339           # F10 (items run bottom-up from the combo)
 $hotkey = SettingValue 'hotkey'
 Check 'clip hotkey picker persists F10' ($hotkey -eq '121') "hotkey=$hotkey"
 
@@ -322,10 +346,43 @@ $fadeOn = SettingValue 'sceneFade'
 Check 'scene fade toggle persists both ways' ($fadeOff -eq '0' -and $fadeOn -eq '1') `
       "off=$fadeOff on=$fadeOn"
 
+# ------------------------------------------------------------- keyboard ------
+# Tab moves the focus ring, Enter activates the focused control.
+Click $hwnd 100 161           # Settings > Filters
+KeyDown $hwnd 0x09            # Tab -> the next rail row (Appearance)
+KeyDown $hwnd 0x0D            # Enter -> activate it
+Start-Sleep -Milliseconds 300
+$kb = Shot $hwnd '15-keyboard-nav'
+$sw = Sample $kb 219 112
+Check 'keyboard: Tab + Enter activates the focused control' (IsViolet $sw) `
+      "rgb=$($sw.r),$($sw.g),$($sw.b)"
+
+# Space toggles the focused switch (Close to tray: off -> on -> off).
+Click $hwnd 100 281           # Behavior category
+Click $hwnd 565 112           # click the toggle once
+$trayOn = SettingValue 'closeToTray'
+KeyDown $hwnd 0x20            # Space -> toggle it back
+Start-Sleep -Milliseconds 250
+$trayOff = SettingValue 'closeToTray'
+Check 'keyboard: Space toggles the focused switch' ($trayOn -eq '1' -and $trayOff -eq '0') `
+      "afterClick=$trayOn afterSpace=$trayOff"
+
+# Arrow keys adjust the focused slider.
+Click $hwnd 284 27            # Record page
+Click $hwnd 860 446           # replay buffer slider
+$before = [int](SettingValue 'replaySeconds')
+KeyDown $hwnd 0x27            # Right arrow
+Start-Sleep -Milliseconds 250
+$after = [int](SettingValue 'replaySeconds')
+Check 'keyboard: arrows adjust the focused slider' ($after -gt $before) `
+      "before=$before after=$after"
+
 # ------------------------------------------------------------ tray & exit ---
 # Reported: "doesn't gracefully exit or clear from the system tray on close".
 # With the browser overlay live: Close-to-tray keeps the app running, and Exit
 # from the tray menu must quit promptly (the browser lifecycle must not hang).
+Click $hwnd 480 27            # Settings page
+Click $hwnd 100 281           # Behavior category
 Click $hwnd 565 112           # Close to tray (row 1, second toggle)
 Check 'close to tray can be enabled' ((SettingValue 'closeToTray') -eq '1') `
       "closeToTray=$(SettingValue 'closeToTray')"
@@ -354,6 +411,30 @@ if ($again.hwnd -eq [IntPtr]::Zero) {
     Check 'X (WM_CLOSE) exits the app' $exited 'process still running'
     if (-not $exited) { Stop-Process -Id $proc.Id -Force }
 }
+
+# --------------------------------------------------- window-source guard -----
+# A window source with no window must refuse to start instead of silently
+# capturing the whole monitor (the reported "grabs the entire display" bug).
+Get-Process ulticast-ui -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Milliseconds 500
+$logDir = Join-Path $env:LOCALAPPDATA 'Ulticast\logs'
+Remove-Item (Join-Path $logDir 'ui-*.log') -Force -ErrorAction SilentlyContinue
+$ini = Join-Path $env:APPDATA 'Ulticast\settings.ini'
+@(
+    'idlePreview=1'
+    'sceneCount=1'
+    # v2|<name>|<cursor>|<sources>; source = type:device:enabled:monitor:window:dxgi:corner:camX:camY
+    'scene0=v2|Game|1|5::1:0::0:3:-1.0000:-1.0000;4::1:0::0:3:-1.0000:-1.0000'
+) | Set-Content -Path $ini -Encoding ascii
+$guard = StartUi
+Start-Sleep -Seconds 7
+$log = Get-ChildItem (Join-Path $logDir 'ui-*.log') -ErrorAction SilentlyContinue |
+       Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$logText = if ($log) { Get-Content $log.FullName -Raw } else { '' }
+Check 'window source with no window refuses to capture a monitor' `
+      ($logText -match 'window source has no window selected') `
+      'engine started a capture anyway'
+if (-not $guard.proc.HasExited) { Stop-Process -Id $guard.proc.Id -Force }
 
 Remove-Item $profileDir -Recurse -Force -ErrorAction SilentlyContinue
 

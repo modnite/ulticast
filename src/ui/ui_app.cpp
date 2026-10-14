@@ -401,6 +401,7 @@ private:
     void ApplyCaptionTheme();
     void ApplyThemeNow();  // palette + gradient + caption + repaint
     void Card(float x, float y, float w, float h, const std::wstring& title);
+    void DrawSceneSourcesCard(float x, float y, float w);  // Settings: see/choose every source target
     D2D1_RECT_F PreviewRect() const { return S(320, 64, 720, 286); }
     // preview <-> canvas mapping for the draggable webcam PiP
     D2D1_RECT_F PreviewCanvasToDevice(const D2D1_RECT_F& pr, float cx, float cy, float cw,
@@ -417,6 +418,8 @@ private:
         Text(s, fmt.Get(), r, color, align);
     }
     float MeasureText(const std::wstring& s, IDWriteTextFormat* fmt);
+    // Trim a label to fit a width, with an ellipsis (never clip mid-character).
+    std::wstring Ellipsize(const std::wstring& s, float maxW);
     void Panel(const D2D1_RECT_F& r, float radius, const D2D1_COLOR_F& fill, bool border);
     void Button(int id, const D2D1_RECT_F& r, const std::wstring& label, BtnStyle style,
                 bool enabled = true);
@@ -483,6 +486,14 @@ private:
     void StopPreview();
     void RestartPreview();  // re-apply source settings to an idle preview
     void OnAction(int id);
+    // Keyboard access: Tab moves the focus ring, Enter/Space activates, arrows
+    // drive popups and sliders.
+    bool* ToggleTarget(int id);
+    void FocusNextControl(bool back);
+    void ActivateControl(int id);
+    void CommitPopupItem(int index);
+    void DrawFocusRing();
+    void RefreshWindowCombo();
     void OnTrayCommand(int id);
     void InitTray();
     void ShowTrayMenu();
@@ -527,6 +538,11 @@ private:
     // widgets
     std::vector<Hit> hits_;
     int hover_ = 0, press_ = 0, dragging_ = 0, focus_ = 0, openCombo_ = -1;
+    // Keyboard focus (Tab): separate from text-field focus so a field can keep
+    // its caret while the ring moves on.
+    int kbdFocus_ = 0;
+    bool kbdNav_ = false;  // the ring shows only after the keyboard was used
+    int kbdItem_ = 0;      // highlighted popup item while navigating with arrows
     std::map<int, D2D1_RECT_F> comboRects_, sliderRects_, fieldRects_;
     std::map<int, std::pair<int, int>> sliderRange_;  // id -> (min, max)
     std::map<int, int*> sliderValue_;                 // id -> bound value
@@ -605,21 +621,31 @@ private:
     bool SceneUsesBrowser() const;
 
     // source list helpers
-    void AddSourceAt(int menuIndex);
+    void AddSourceAt(int menuIndex, int choiceNumber, const std::wstring& choiceText);
+    void BeginAddSource(int menuIndex);  // asks for a target first when there is a choice
     void ApplySourceProperty(int sourceIndex, int itemIndex);
     void BuildSourceProperties(int sourceIndex);
     std::vector<std::wstring> SourceMenuItems() const;
     std::wstring SourceLabel(const UiSource& s) const;
     std::wstring SourceTag(const UiSource& s) const;
     bool IsSecondaryCapture(int sourceIndex) const;
+    bool IsCaptureLayer(const UiSource& s) const;
     void EnsureSceneDefaults(UiScene& scene) const;
     std::vector<SessionSource> SceneSources(const UiScene& sc) const;
     void DrawActionPopup();
     int openAction_ = 0;         // source menu / properties popup (0 = none)
+    // Target picker (window / monitor): shown when adding a source that needs a
+    // choice and when changing an existing source's target.
+    enum class PickMode { None, AddWindow, AddMonitor, SwitchWindow };
+    PickMode pickMode_ = PickMode::None;
+    int pendingAdd_ = -1;        // source-menu index waiting for its choice
+    std::vector<std::wstring> pickItems_;
     int actionSource_ = -1;      // source index the properties popup belongs to
     D2D1_RECT_F actionRect_{};   // anchor rect for the popup
     D2D1_RECT_F addBtnRect_{};   // "+ Add" button rect
     D2D1_RECT_F addMenuRect_{};  // wider anchor for the add-source popup
+    float lastCardX_ = 0, lastCardY_ = 0, lastCardW_ = 0, lastCardH_ = 0;
+    std::wstring lastCardTitle_;
     std::vector<D2D1_RECT_F> sourceRowRects_;
     struct PropItem {
         int kind = 0;       // 0 monitor, 1 window picker, 2 dxgi, 3 video device,
@@ -629,7 +655,6 @@ private:
     };
     std::vector<PropItem> propItems_;
     std::vector<std::wstring> propLabels_;
-    std::vector<std::wstring> windowPickItems_;
     bool sourceHintShown_ = false;
 
     // idle preview (capture-only session while not recording)
@@ -958,6 +983,14 @@ float UiApp::MeasureText(const std::wstring& s, IDWriteTextFormat* fmt) {
     DWRITE_TEXT_METRICS m{};
     layout->GetMetrics(&m);
     return m.widthIncludingTrailingWhitespace;
+}
+
+std::wstring UiApp::Ellipsize(const std::wstring& s, float maxW) {
+    if (maxW <= 0 || s.empty()) return s;
+    if (MeasureText(s, fmtSmall_.Get()) <= maxW) return s;
+    std::wstring cut = s;
+    while (!cut.empty() && MeasureText(cut + L"…", fmtSmall_.Get()) > maxW) cut.pop_back();
+    return cut.empty() ? std::wstring() : cut + L"…";
 }
 
 void UiApp::Panel(const D2D1_RECT_F& r, float radius, const D2D1_COLOR_F& fill, bool border) {
@@ -1519,6 +1552,7 @@ void UiApp::Paint() {
         DrawActionPopup();
     else
         DrawPopup();
+    DrawFocusRing();  // keyboard focus indicator (Tab navigation)
 
     HRESULT hr = dc_->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {
@@ -1749,7 +1783,8 @@ void UiApp::DrawSceneRail() {
 
     // name + add/remove
     y = 86 + n * 36 + 8;
-    Field(ID_SCENE_NAME, S(x, y, 180, 34), &sceneName_, false, L"Scene name");
+    Text(L"Name", fmtSmall_, S(x, y, 44, 34), WithAlpha(kTextDim, 0.85f));
+    Field(ID_SCENE_NAME, S(x + 46, y, 134, 34), &sceneName_, false, L"Scene name");
     Button(ID_SCENE_ADD, S(x + 188, y, 44, 34), L"+", BtnStyle::Ghost, scenes_.size() < 6);
     Button(ID_SCENE_REMOVE, S(x + 240, y, 40, 34), L"-", BtnStyle::Ghost, scenes_.size() > 1);
 
@@ -1775,13 +1810,14 @@ void UiApp::DrawSceneRail() {
         Text(SourceTag(sc.sources[i]), fmtPill_, S(x + 8, y, 40, 32), kAccent,
              DWRITE_TEXT_ALIGNMENT_CENTER);
         dc_->PushAxisAlignedClip(S(x + 52, y, w - 52 - 120, 32), D2D1_ANTIALIAS_MODE_ALIASED);
-        Text(SourceLabel(sc.sources[i]), fmtSmall_, S(x + 52, y, w - 52 - 120, 32),
+        Text(Ellipsize(SourceLabel(sc.sources[i]), w - 52 - 120 - Px(6)), fmtSmall_,
+             S(x + 52, y, w - 52 - 120, 32),
              sc.sources[i].enabled ? kText : WithAlpha(kTextDim, 0.6f));
         dc_->PopAxisAlignedClip();
 
         // z-order: chevrons move the source up/down (captures stay pinned so the
         // primary capture never changes under a running session).
-        const bool isCapture = sc.sources[i].type == SessionSourceType::Capture;
+        const bool isCapture = IsCaptureLayer(sc.sources[i]);
         D2D1_RECT_F upR = S(x + w - 94, y + 5, 18, 22);
         D2D1_RECT_F dnR = S(x + w - 74, y + 5, 18, 22);
         const bool canUp = !isCapture && i > 0;
@@ -1804,21 +1840,28 @@ void UiApp::DrawSceneRail() {
         y += 36;
     }
 
-    // ACTIVITY fills whatever rail space is left (no dead space).
+    // ACTIVITY fills the rail, but only up to a sane height: an oversized empty
+    // box reads worse than a little breathing room.
     const float actTop = y + 8;
+    const float actMaxH = 170;
     if (actTop < 624 - 70) {
-        Card(x, actTop, w, 624 - actTop, L"ACTIVITY");
-        int lines = (int)((624 - actTop - 36) / 14);
+        const float h = (std::min)(624 - actTop, actMaxH);
+        Card(x, actTop, w, h, L"ACTIVITY");
+        int lines = (int)((h - 36) / 14);
         if (lines < 1) lines = 1;
         DrawActivityStrip(S(x + 10, actTop + 30, w - 20, (float)lines * 14), lines);
+        if (624 - (actTop + h) > 46)
+            Text(L"F9 saves a clip while the replay buffer is armed.", fmtSmall_,
+                 S(x, actTop + h + 8, w, 18), WithAlpha(kTextDim, 0.7f));
     }
 }
 
 std::wstring UiApp::SourceTag(const UiSource& s) const {
     switch (s.type) {
         case SessionSourceType::Capture:
-            if (!s.window.empty()) return L"WIN";
+            if (!s.window.empty()) return L"WIN";  // legacy: window stored on a capture
             return s.dxgi ? L"GAME" : L"DISP";
+        case SessionSourceType::Window: return L"WIN";
         case SessionSourceType::Webcam: return L"VID";
         case SessionSourceType::Browser: return L"WEB";
         case SessionSourceType::AudioIn: return L"MIC";
@@ -1833,6 +1876,8 @@ std::wstring UiApp::SourceLabel(const UiSource& s) const {
             if (!s.window.empty()) return s.window;
             if (s.monitor >= 0 && s.monitor < (int)monitors_.size()) return monitors_[s.monitor];
             return Format(L"Display %d", s.monitor + 1);
+        case SessionSourceType::Window:
+            return s.window.empty() ? L"No window selected — click to choose" : s.window;
         case SessionSourceType::Webcam:
             return s.device.empty() ? L"Default camera / capture card" : Widen(s.device);
         case SessionSourceType::Browser:
@@ -1845,13 +1890,17 @@ std::wstring UiApp::SourceLabel(const UiSource& s) const {
     return L"Source";
 }
 
+bool UiApp::IsCaptureLayer(const UiSource& s) const {
+    return s.type == SessionSourceType::Capture || s.type == SessionSourceType::Window;
+}
+
 bool UiApp::IsSecondaryCapture(int sourceIndex) const {
     if (scenes_.empty()) return false;
     const UiScene& sc = scenes_[activeScene_];
     if (sourceIndex < 0 || sourceIndex >= (int)sc.sources.size()) return false;
-    if (sc.sources[sourceIndex].type != SessionSourceType::Capture) return false;
+    if (!IsCaptureLayer(sc.sources[sourceIndex])) return false;
     for (int i = 0; i < sourceIndex; ++i)
-        if (sc.sources[i].type == SessionSourceType::Capture) return true;
+        if (IsCaptureLayer(sc.sources[i])) return true;
     return false;
 }
 
@@ -1872,9 +1921,12 @@ void UiApp::BuildSourceProperties(int sourceIndex) {
     };
     switch (s.type) {
         case SessionSourceType::Capture:
-            for (size_t i = 0; i < monitors_.size(); ++i) add(0, monitors_[i], "", (int)i);
-            add(1, s.window.empty() ? L"Window capture: pick a window…"
-                                    : L"Window: " + s.window);
+            for (size_t i = 0; i < monitors_.size(); ++i) {
+                std::wstring label = monitors_[i];
+                if (s.window.empty() && s.monitor == (int)i) label += L"  (current)";
+                add(0, label, "", (int)i);
+            }
+            if (!s.window.empty()) add(1, L"Change window… (" + s.window + L")");
             add(2, s.dxgi ? L"Game mode (DXGI duplication): on"
                           : L"Game mode (DXGI duplication): off");
             if (IsSecondaryCapture(sourceIndex)) {
@@ -1886,6 +1938,15 @@ void UiApp::BuildSourceProperties(int sourceIndex) {
             }
             add(5, L"Remove source");
             break;
+        case SessionSourceType::Window: {
+            for (const std::wstring& t : WgcCapture::ListWindows()) {
+                std::wstring label = t;
+                if (t == s.window) label += L"  (current)";
+                add(10, label, Narrow(t));
+            }
+            add(5, L"Remove source");
+            break;
+        }
         case SessionSourceType::Webcam: {
             add(6, L"Default camera / capture card");
             for (size_t i = 1; i < webcams_.size(); ++i) add(3, webcams_[i], Narrow(webcams_[i]));
@@ -1926,15 +1987,19 @@ void UiApp::ApplySourceProperty(int sourceIndex, int itemIndex) {
         case 0:  // monitor
             s.monitor = it.number;
             s.window.clear();
+            s.type = SessionSourceType::Capture;  // a monitor choice is a display source
             captureChanged = true;
             break;
-        case 1: {  // window picker (second step)
-            windowPickItems_.clear();
-            windowPickItems_.push_back(L"Full monitor (no window)");
-            for (auto& t : WgcCapture::ListWindows()) windowPickItems_.push_back(t);
+        case 1: {  // pick a window: the source becomes a window capture
+            pickItems_ = WgcCapture::ListWindows();
+            if (pickItems_.empty()) {
+                statusText_ = L"No capturable windows found — open the window you want first";
+                statusError_ = true;
+                return;
+            }
+            pickMode_ = PickMode::SwitchWindow;
             actionSource_ = sourceIndex;
             openAction_ = ID_WINDOW_PICK;
-            actionRect_ = actionRect_;
             return;  // the popup opens; no other change yet
         }
         case 2:  // DXGI toggle
@@ -1960,8 +2025,14 @@ void UiApp::ApplySourceProperty(int sourceIndex, int itemIndex) {
             break;
         case 8:  // jump to the overlay URL in Settings
             page_ = 2;
+            settingsCat_ = 4;  // Browser category
             openAction_ = 0;
             return;
+        case 10:  // window chosen from the picker list
+            s.type = SessionSourceType::Window;
+            s.window = Widen(it.value);
+            captureChanged = true;
+            break;
     }
     SyncSettingsFromUi();
     SaveUiSettings(settings_);
@@ -1973,36 +2044,71 @@ void UiApp::ApplySourceProperty(int sourceIndex, int itemIndex) {
     }
 }
 
-void UiApp::AddSourceAt(int menuIndex) {
+void UiApp::BeginAddSource(int menuIndex) {
+    if (scenes_.empty()) return;
+    // Sources with more than one sensible choice ask first: nothing is created
+    // until the user picks, and no target is ever assumed.
+    if (menuIndex == 1) {  // window capture
+        pickItems_ = WgcCapture::ListWindows();
+        if (pickItems_.empty()) {
+            statusText_ = L"No capturable windows found — open the window you want, then add it";
+            statusError_ = true;
+            return;
+        }
+        pickMode_ = PickMode::AddWindow;
+        pendingAdd_ = menuIndex;
+        openAction_ = ID_WINDOW_PICK;
+        return;
+    }
+    if ((menuIndex == 0 || menuIndex == 2) && monitors_.size() > 1) {
+        pickItems_ = monitors_;
+        pickMode_ = PickMode::AddMonitor;
+        pendingAdd_ = menuIndex;
+        openAction_ = ID_WINDOW_PICK;
+        return;
+    }
+    AddSourceAt(menuIndex, -1, std::wstring());
+}
+
+void UiApp::AddSourceAt(int menuIndex, int choiceNumber, const std::wstring& choiceText) {
     if (scenes_.empty()) return;
     UiScene& sc = scenes_[activeScene_];
-    auto findCapture = [&]() -> int {
-        for (size_t i = 0; i < sc.sources.size(); ++i)
-            if (sc.sources[i].type == SessionSourceType::Capture) return (int)i;
-        return -1;
-    };
+    const D2D1_RECT_F anchor = actionRect_;
     auto has = [&](SessionSourceType t) {
         for (const UiSource& s : sc.sources)
             if (s.type == t) return true;
         return false;
     };
     UiSource s;
+    int openProps = -1;
     switch (menuIndex) {
-        case 0:  // display
-        case 1:  // window
+        case 0:    // display capture
         case 2: {  // game (DXGI)
             s.type = SessionSourceType::Capture;
-            s.monitor = selMonitor_;
+            s.monitor = choiceNumber >= 0 ? choiceNumber : selMonitor_;
             s.dxgi = menuIndex == 2;
-            if (menuIndex == 1 && selWindow_ > 0 && selWindow_ < (int)windows_.size())
-                s.window = windows_[selWindow_];
             s.corner = 3;
             int captures = 0;
             for (const UiSource& src : sc.sources)
-                if (src.type == SessionSourceType::Capture) ++captures;
+                if (IsCaptureLayer(src)) ++captures;
             sc.sources.push_back(s);
-            statusText_ = captures == 0 ? L"Capture source added"
-                                        : L"Capture added as a picture-in-picture layer";
+            statusText_ = captures == 0 ? L"Display source added"
+                                        : L"Display added as a picture-in-picture layer";
+            statusError_ = false;
+            break;
+        }
+        case 1: {  // window capture: a specific window is required
+            if (choiceText.empty()) {
+                statusText_ = L"No window chosen — the source was not added";
+                statusError_ = true;
+                break;
+            }
+            s.type = SessionSourceType::Window;
+            s.window = choiceText;
+            s.monitor = selMonitor_;
+            s.corner = 3;
+            sc.sources.push_back(s);
+            statusText_ = L"Window source added — it captures only that window";
             statusError_ = false;
             break;
         }
@@ -2011,7 +2117,8 @@ void UiApp::AddSourceAt(int menuIndex) {
             s.device = settings_.webcamDevice;
             s.corner = 3;
             sc.sources.push_back(s);
-            statusText_ = L"Video source added — click its row to pick a device";
+            openProps = (int)sc.sources.size() - 1;
+            statusText_ = L"Video source added — pick the device from the list";
             statusError_ = false;
             break;
         case 4:  // microphone
@@ -2019,6 +2126,9 @@ void UiApp::AddSourceAt(int menuIndex) {
                 s.type = SessionSourceType::AudioIn;
                 s.device = settings_.micDevice;
                 sc.sources.push_back(s);
+                openProps = (int)sc.sources.size() - 1;
+                statusText_ = L"Microphone added — pick the device from the list";
+                statusError_ = false;
             }
             break;
         case 5:  // desktop audio
@@ -2026,12 +2136,17 @@ void UiApp::AddSourceAt(int menuIndex) {
                 s.type = SessionSourceType::AudioOut;
                 s.device = settings_.desktopDevice;
                 sc.sources.push_back(s);
+                openProps = (int)sc.sources.size() - 1;
+                statusText_ = L"Desktop audio added — pick the output from the list";
+                statusError_ = false;
             }
             break;
         case 6:  // browser overlay
             if (!has(SessionSourceType::Browser)) {
                 s.type = SessionSourceType::Browser;
                 sc.sources.push_back(s);
+                statusText_ = L"Browser source added — set the overlay URL in Settings";
+                statusError_ = false;
             }
             break;
     }
@@ -2039,6 +2154,15 @@ void UiApp::AddSourceAt(int menuIndex) {
     SaveUiSettings(settings_);
     PushSceneSources();
     RestartPreview();
+    if (openProps >= 0) {
+        // Straight into the choice: the popup lists the devices for this source.
+        BuildSourceProperties(openProps);
+        actionSource_ = openProps;
+        openAction_ = ID_SRC_PROP_BASE + openProps;
+        const bool haveRow = openProps < (int)sourceRowRects_.size() &&
+                             sourceRowRects_[openProps].right > sourceRowRects_[openProps].left;
+        actionRect_ = haveRow ? sourceRowRects_[openProps] : anchor;
+    }
     if (menuIndex <= 2 && sessionRunning_ && !previewSession_) {
         statusText_ = L"Capture source changed — press Stop/Start to apply";
         statusError_ = false;
@@ -2253,8 +2377,7 @@ void UiApp::MoveSource(int index, int delta) {
     const int j = index + delta;
     if (index < 0 || index >= (int)sc.sources.size() || j < 0 || j >= (int)sc.sources.size())
         return;
-    if (sc.sources[index].type == SessionSourceType::Capture ||
-        sc.sources[j].type == SessionSourceType::Capture) {
+    if (IsCaptureLayer(sc.sources[index]) || IsCaptureLayer(sc.sources[j])) {
         statusText_ = L"Capture sources keep their position (remove and re-add to move)";
         statusError_ = false;
         return;
@@ -2273,7 +2396,7 @@ void UiApp::DrawActionPopup() {
     if (openAction_ == ID_ADD_SOURCE) {
         popup_.items = SourceMenuItems();
     } else if (openAction_ == ID_WINDOW_PICK) {
-        popup_.items = windowPickItems_;
+        popup_.items = pickItems_;
     } else {
         popup_.items = propLabels_;
     }
@@ -2339,40 +2462,44 @@ void UiApp::DrawPreviewStats(const D2D1_RECT_F& r) {
 }
 
 void UiApp::DrawRecordCards() {
-    const float rowH = 32, gap = 4, pad = 10, headH = 18, cw = 212;
+    const float rowH = 32, gap = 4, pad = 10, headH = 18;
     const float cy = 362, ch = pad + headH + 6 * rowH + 5 * gap + pad;
 
-    Card(320, cy, 232, ch, L"RECORDING");
+    // Two wider cards instead of three cramped ones: the encoder lives in
+    // Settings > Encoding (it is not something you touch while recording).
+    const float rx = 320, rw = 352, rcw = rw - 2 * pad;
+    Card(rx, cy, rw, ch, L"RECORDING");
     float y = cy + pad + headH + 4;
-    D2D1_RECT_F pathR = S(320 + pad, y, cw - 92, rowH);
+    D2D1_RECT_F pathR = S(rx + pad, y, rcw - 92, rowH);
     Panel(pathR, 8, kPanel, true);
     dc_->PushAxisAlignedClip(pathR, D2D1_ANTIALIAS_MODE_ALIASED);
     Text(ShortPath(WithExtension(settings_.recordPath, selContainer_ == 1 ? "mp4" : "mkv")),
          fmtSmall_, Inset(pathR, 12, 0), kText);
     dc_->PopAxisAlignedClip();
-    Button(ID_BROWSE, S(320 + pad + cw - 84, y, 84, rowH), L"Browse", BtnStyle::Ghost);
+    Button(ID_BROWSE, S(rx + pad + rcw - 84, y, 84, rowH), L"Browse", BtnStyle::Ghost);
     y += rowH + gap;
-    Combo(ID_COMBO_CODEC, S(320 + pad, y, cw, rowH), codecs_, &selCodec_);
+    Combo(ID_COMBO_CODEC, S(rx + pad, y, rcw, rowH), codecs_, &selCodec_);
     y += rowH + gap;
-    Combo(ID_COMBO_CONTAINER, S(320 + pad, y, cw, rowH), containers_, &selContainer_);
+    Combo(ID_COMBO_CONTAINER, S(rx + pad, y, rcw, rowH), containers_, &selContainer_);
     y += rowH + gap;
-    Toggle(ID_TOGGLE_TRACKS, S(320 + pad, y, cw, rowH), L"Separate mic track",
+    Toggle(ID_TOGGLE_TRACKS, S(rx + pad, y, rcw, rowH), L"Separate mic track",
            &separateTracks_);
     y += rowH + gap;
     Text(selContainer_ == 1 ? L"MP4 needs a clean stop" : L"MKV survives crashes",
-         fmtSmall_, S(320 + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+         fmtSmall_, S(rx + pad, y, rcw, rowH), WithAlpha(kTextDim, 0.7f));
     y += rowH + gap;
-    Button(ID_OPENFOLDER, S(320 + pad, y, cw, rowH), L"Open Folder", BtnStyle::Ghost);
+    Button(ID_OPENFOLDER, S(rx + pad, y, rcw, rowH), L"Open Folder", BtnStyle::Ghost);
 
-    Card(564, cy, 232, ch, L"CLIPS");
+    const float cx = 684, cw2 = 356, ccw = cw2 - 2 * pad;
+    Card(cx, cy, cw2, ch, L"CLIPS");
     y = cy + pad + headH + 4;
-    Toggle(ID_TOGGLE_REPLAY, S(564 + pad, y, cw, rowH), L"Replay", &settings_.replay);
+    Toggle(ID_TOGGLE_REPLAY, S(cx + pad, y, ccw, rowH), L"Replay", &settings_.replay);
     y += rowH + gap;
-    Slider(ID_SLIDER_REPLAY, S(564 + pad, y, cw, rowH), 10, 120, &settings_.replaySeconds,
+    Slider(ID_SLIDER_REPLAY, S(cx + pad, y, ccw, rowH), 10, 120, &settings_.replaySeconds,
            L"%ds");
     y += rowH + gap;
-    Text(L"Clip key", fmtBody_, S(564 + pad, y, 62, rowH), kTextDim);
-    Combo(ID_COMBO_HOTKEY, S(564 + pad + 66, y, cw - 66, rowH), hotkeys_, &selHotkey_);
+    Text(L"Clip key", fmtBody_, S(cx + pad, y, 62, rowH), kTextDim);
+    Combo(ID_COMBO_HOTKEY, S(cx + pad + 66, y, ccw - 66, rowH), hotkeys_, &selHotkey_);
     y += rowH + gap;
     Text(settings_.replay
              ? Format(L"%s saves the last moments",
@@ -2380,79 +2507,44 @@ void UiApp::DrawRecordCards() {
                                                                                       : 3]
                           .c_str())
              : L"Arm the replay buffer above",
-         fmtSmall_, S(564 + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+         fmtSmall_, S(cx + pad, y, ccw, rowH), WithAlpha(kTextDim, 0.7f));
     y += rowH + gap;
-    Button(ID_CLIP, S(564 + pad, y, cw, rowH), L"Save Clip", BtnStyle::Ghost,
+    Button(ID_CLIP, S(cx + pad, y, ccw, rowH), L"Save Clip", BtnStyle::Ghost,
            stats_.replayArmed);
     y += rowH + gap;
-    Text(L"Clips land next to the recording", fmtSmall_, S(564 + pad, y, cw, rowH),
+    Text(L"Clips land next to the recording", fmtSmall_, S(cx + pad, y, ccw, rowH),
          WithAlpha(kTextDim, 0.7f));
-
-    Card(808, cy, 232, ch, L"ENCODING");
-    y = cy + pad + headH + 4;
-    Combo(ID_COMBO_RATE, S(808 + pad, y, cw, rowH), rates_, &selRate_);
-    y += rowH + gap;
-    if (selRate_ == 0)
-        Slider(ID_SLIDER_CQP, S(808 + pad, y, cw, rowH), 1, 51, (int*)&settings_.cqp, L"CQ %d");
-    else
-        Field(ID_FIELD_BITRATE, S(808 + pad, y, cw, rowH), &bitrateText_, false,
-              L"Bitrate (kbps)");
-    y += rowH + gap;
-    Combo(ID_COMBO_PRESET, S(808 + pad, y, cw, rowH), presets_, &selPreset_);
-    y += rowH + gap;
-    Slider(ID_SLIDER_BFRAMES, S(808 + pad, y, cw, rowH), 0, 4, &settings_.bframes,
-           L"B-frames %d");
-    y += rowH + gap;
-    Toggle(ID_TOGGLE_LOOKAHEAD, S(808 + pad, y, cw, rowH), L"Lookahead", &settings_.lookahead);
-    y += rowH + gap;
-    Toggle(ID_TOGGLE_MULTIPASS, S(808 + pad, y, cw, rowH), L"Two-pass", &settings_.multipass);
 }
 
 void UiApp::DrawStreamCards() {
-    const float rowH = 32, gap = 4, pad = 10, headH = 18, cw = 212;
+    const float rowH = 32, gap = 4, pad = 10, headH = 18;
     const float cy = 362, ch = pad + headH + 6 * rowH + 5 * gap + pad;
 
-    Card(320, cy, 232, ch, L"PLATFORM");
+    // Two wider cards: the stream encoder lives in Settings > Encoding.
+    const float px = 320, pw = 352, pcw = pw - 2 * pad;
+    Card(px, cy, pw, ch, L"PLATFORM");
     float y = cy + pad + headH + 4;
-    Combo(ID_COMBO_PLATFORM, S(320 + pad, y, cw, rowH), platforms_, &selPlatform_);
+    Combo(ID_COMBO_PLATFORM, S(px + pad, y, pcw, rowH), platforms_, &selPlatform_);
     y += rowH + gap;
     if (platformKeys_[selPlatform_] == "custom")
-        Field(ID_FIELD_URL, S(320 + pad, y, cw, rowH), &urlText_, false, L"rtmp:// ingest URL");
+        Field(ID_FIELD_URL, S(px + pad, y, pcw, rowH), &urlText_, false, L"rtmp:// ingest URL");
     else
-        Field(ID_FIELD_KEY, S(320 + pad, y, cw, rowH), &keyText_, true, L"Stream key");
+        Field(ID_FIELD_KEY, S(px + pad, y, pcw, rowH), &keyText_, true, L"Stream key");
     y += rowH + gap;
-    Slider(ID_SLIDER_RECONNECT, S(320 + pad, y, cw, rowH), 1, 10, &settings_.streamReconnect,
+    Slider(ID_SLIDER_RECONNECT, S(px + pad, y, pcw, rowH), 1, 10, &settings_.streamReconnect,
            L"%dx");
     y += rowH + gap;
-    Field(ID_FIELD_STREAMBITRATE, S(320 + pad, y, cw, rowH), &streamBitrateText_, false,
+    Field(ID_FIELD_STREAMBITRATE, S(px + pad, y, pcw, rowH), &streamBitrateText_, false,
           L"Bitrate kbps (CBR)");
     y += rowH + gap;
-    Combo(ID_COMBO_STREAMCODEC, S(320 + pad, y, cw, rowH), streamCodecs_, &selStreamCodec_);
+    Combo(ID_COMBO_STREAMCODEC, S(px + pad, y, pcw, rowH), streamCodecs_, &selStreamCodec_);
     y += rowH + gap;
-    Text(L"Press Go Live to start", fmtSmall_, S(320 + pad, y, cw, rowH),
-         WithAlpha(kTextDim, 0.7f));
-
-    Card(564, cy, 232, ch, L"STREAM ENCODER");
-    y = cy + pad + headH + 4;
-    Combo(ID_COMBO_STREAMPRESET, S(564 + pad, y, cw, rowH), presets_, &selStreamPreset_);
-    y += rowH + gap;
-    Slider(ID_SLIDER_STREAMBFRAMES, S(564 + pad, y, cw, rowH), 0, 4, &settings_.streamBframes,
-           L"B-frames %d");
-    y += rowH + gap;
-    Toggle(ID_TOGGLE_STREAMLOOKAHEAD, S(564 + pad, y, cw, rowH), L"Lookahead",
-           &settings_.streamLookahead);
-    y += rowH + gap;
-    Toggle(ID_TOGGLE_STREAMMULTIPASS, S(564 + pad, y, cw, rowH), L"Two-pass",
-           &settings_.streamMultipass);
-    y += rowH + gap;
-    Text(L"CBR at the bitrate on the left", fmtSmall_, S(564 + pad, y, cw, rowH),
-         WithAlpha(kTextDim, 0.7f));
-    y += rowH + gap;
-    Text(L"Two-pass: slower, better quality", fmtSmall_, S(564 + pad, y, cw, rowH),
+    Text(L"Press Go Live to start", fmtSmall_, S(px + pad, y, pcw, rowH),
          WithAlpha(kTextDim, 0.7f));
 
     // TWITCH ACCOUNT: connect once, then the stream key keeps itself current.
-    Card(808, cy, 232, ch, L"TWITCH ACCOUNT");
+    const float tx = 684, tw = 356, tcw = tw - 2 * pad;
+    Card(tx, cy, tw, ch, L"TWITCH ACCOUNT");
     y = cy + pad + headH + 4;
     {
         std::lock_guard<std::mutex> lk(twitchMu_);
@@ -2461,28 +2553,59 @@ void UiApp::DrawStreamCards() {
         if (st.empty())
             st = connected ? (L"Connected as " + Widen(settings_.twitchChannel))
                            : L"Not connected — paste a key or connect";
-        Text(st, fmtSmall_, S(808 + pad, y, cw, rowH), connected ? kOk : WithAlpha(kTextDim, 0.8f));
+        Text(st, fmtSmall_, S(tx + pad, y, tcw, rowH), connected ? kOk : WithAlpha(kTextDim, 0.8f));
     }
     y += rowH + gap;
     {
         const bool connected = !settings_.twitchChannel.empty();
         const int st = twitchState_.load();
         const bool busy = st == (int)TwitchState::Working || st == (int)TwitchState::WaitingAuth;
-        Button(ID_TWITCH_CONNECT, S(808 + pad, y, cw, rowH),
+        Button(ID_TWITCH_CONNECT, S(tx + pad, y, tcw, rowH),
                busy ? L"Waiting…" : (connected ? L"Refresh stream key" : L"Connect Twitch"),
                BtnStyle::Primary, !busy);
         y += rowH + gap;
-        Button(ID_TWITCH_DISCONNECT, S(808 + pad, y, cw, rowH), L"Disconnect", BtnStyle::Ghost,
+        Button(ID_TWITCH_DISCONNECT, S(tx + pad, y, tcw, rowH), L"Disconnect", BtnStyle::Ghost,
                connected && !busy);
         y += rowH + gap;
-        Field(ID_FIELD_TWITCHCID, S(808 + pad, y, cw, rowH), &twitchClientIdText_, false,
+        Field(ID_FIELD_TWITCHCID, S(tx + pad, y, tcw, rowH), &twitchClientIdText_, false,
               L"Client ID (optional)");
         y += rowH + gap;
-        Text(L"Connect once — the key stays current", fmtSmall_, S(808 + pad, y, cw, rowH),
+        Text(L"Connect once — the key stays current", fmtSmall_, S(tx + pad, y, tcw, rowH),
              WithAlpha(kTextDim, 0.7f));
         y += rowH + gap;
-        Text(L"Key stored DPAPI-encrypted", fmtSmall_, S(808 + pad, y, cw, rowH),
+        Text(L"Key stored DPAPI-encrypted", fmtSmall_, S(tx + pad, y, tcw, rowH),
              WithAlpha(kTextDim, 0.7f));
+    }
+}
+
+void UiApp::DrawSceneSourcesCard(float x, float y, float w) {
+    if (scenes_.empty()) return;
+    const float rowH = 32, rowGap = 5, pad = 10, headH = 18;
+    const UiScene& sc = scenes_[activeScene_];
+    const int n = (int)sc.sources.size();
+    if (n <= 0) return;
+    Card(x, y, w, pad + headH + n * rowH + (n - 1) * rowGap + pad, L"SOURCES IN THIS SCENE");
+    sourceRowRects_.assign(sc.sources.size(), D2D1_RECT_F{});
+    float ry = y + pad + headH + 4;
+    const float cw = w - 2 * pad;
+    for (int i = 0; i < n; ++i) {
+        const UiSource& s = sc.sources[i];
+        D2D1_RECT_F tagR = S(x + pad, ry, 46, rowH);
+        Panel(tagR, 6, WithAlpha(kPanel2, 0.9f), false);
+        Text(SourceTag(s), fmtSmall_, tagR, s.enabled ? kText : WithAlpha(kTextDim, 0.6f),
+             DWRITE_TEXT_ALIGNMENT_CENTER);
+        const float labelX = x + pad + 54;
+        const float labelW = cw - 54 - 84 - 60;
+        dc_->PushAxisAlignedClip(S(labelX, ry, labelW, rowH), D2D1_ANTIALIAS_MODE_ALIASED);
+        Text(Ellipsize(SourceLabel(s), labelW - Px(6)), fmtSmall_, S(labelX, ry, labelW, rowH),
+             s.enabled ? WithAlpha(kText, 0.9f) : WithAlpha(kTextDim, 0.6f));
+        dc_->PopAxisAlignedClip();
+        D2D1_RECT_F chooseR = S(x + pad + cw - 138, ry, 82, rowH);
+        sourceRowRects_[i] = chooseR;
+        Button(ID_SRC_PROP_BASE + i, chooseR, L"Choose…", BtnStyle::Ghost);
+        Toggle(ID_SRC_TOGGLE_BASE + i, S(x + pad + cw - 50, ry, 50, rowH), L"",
+               &scenes_[activeScene_].sources[i].enabled, true, /*pinRight=*/true);
+        ry += rowH + rowGap;
     }
 }
 
@@ -2493,8 +2616,8 @@ void UiApp::DrawSettingsPage() {
     };
     static const wchar_t* kCats[] = {L"Capture",  L"Camera & Audio", L"Filters",
                                      L"Appearance", L"Browser",      L"Behavior",
-                                     L"Help",     L"About"};
-    constexpr int catCount = 8;
+                                     L"Encoding", L"Help",         L"About"};
+    constexpr int catCount = 9;
 
     // ---- category rail: one section at a time instead of a wall of cards
     {
@@ -2535,9 +2658,10 @@ void UiApp::DrawSettingsPage() {
                 y += rowH + rowGap + 20;  // advanced divider
                 Combo(ID_COMBO_GPU, S(x + pad, y, cw, rowH), gpus_, &selGpu_);
                 y += rowH + rowGap;
-                Text(L"These are defaults — every Display/Window source can pick its own monitor, "
-                     L"window and backend.",
+                Text(L"Defaults only — each Display/Window source picks its own target.",
                      fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                cy += cardH(4) + 20 + cardGap;
+                DrawSceneSourcesCard(x, cy, w);
                 break;
             }
             case 1: {  // --------------------------------------- Camera & Audio
@@ -2560,6 +2684,8 @@ void UiApp::DrawSettingsPage() {
                 y += rowH + rowGap;
                 Text(L"Gate, compressor and monitoring are in Filters.", fmtSmall_,
                      S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                cy += cardH(4) + cardGap;
+                DrawSceneSourcesCard(x, cy, w);
                 break;
             }
             case 2: {  // ---------------------------------------------- Filters
@@ -2593,6 +2719,17 @@ void UiApp::DrawSettingsPage() {
                 y += rowH + rowGap;
                 Text(L"Presets set both filters; the sliders stay live while recording.",
                      fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                cy += cardH(6) + cardGap;
+                Card(x, cy, w, cardH(3), L"HOW THESE HELP");
+                y = cy + pad + headH + 4;
+                Text(L"Noise gate: mutes the mic below the threshold — kills room hum and key clatter.",
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kText, 0.85f));
+                y += rowH + rowGap;
+                Text(L"Compressor: evens out loud and quiet speech; the -1 dB clip protects peaks.",
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kText, 0.85f));
+                y += rowH + rowGap;
+                Text(L"Monitor mic: hear the processed mic in your headphones.",
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kText, 0.85f));
                 break;
             }
             case 3: {  // ------------------------------------------- Appearance
@@ -2628,6 +2765,21 @@ void UiApp::DrawSettingsPage() {
                 y += rowH + rowGap;
                 Text(L"The accent repaints instantly and is remembered next launch.", fmtSmall_,
                      S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                cy += cardH(2) + cardGap;
+                Card(x, cy, w, cardH(2), L"THEME SAMPLE");
+                y = cy + pad + headH + 4;
+                {
+                    bool sampleToggle = true;
+                    std::wstring sampleText = L"Sample field";
+                    Toggle(0, S(x + pad, y, 150, rowH), L"Sample toggle", &sampleToggle);
+                    Button(0, S(x + pad + 160, y, 130, rowH), L"Sample button",
+                           BtnStyle::Ghost);
+                    Field(9000, S(x + pad + 300, y, cw - 300, rowH), &sampleText, false,
+                          L"Sample field");
+                }
+                y += rowH + rowGap;
+                Text(L"Every screen uses these controls — this is the current theme.",
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
                 break;
             }
             case 4: {  // ---------------------------------------------- Browser
@@ -2671,9 +2823,78 @@ void UiApp::DrawSettingsPage() {
                 y += rowH + rowGap;
                 Text(L"The camera opens only while recording, streaming or replay is armed.",
                      fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                cy += cardH(4) + cardGap;
+                Card(x, cy, w, cardH(4), L"WHAT HAPPENS");
+                y = cy + pad + headH + 4;
+                Text(settings_.closeToTray
+                         ? L"Closing the window (X): hides to the tray — right-click the icon and "
+                           L"choose Exit to quit."
+                         : L"Closing the window (X): quits Ulticast (turn on Close to tray to keep "
+                           L"it running).",
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kText, 0.85f));
+                y += rowH + rowGap;
+                Text(settings_.idlePreview
+                         ? L"While idle: the preview keeps running, so the scene can be set up "
+                           L"before going live."
+                         : L"While idle: no capture runs — the preview starts when you record, "
+                           L"stream or arm replay.",
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kText, 0.85f));
+                y += rowH + rowGap;
+                Text(settings_.sceneFade ? L"Switching scenes: 250 ms crossfade."
+                                         : L"Switching scenes: instant cut.",
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kText, 0.85f));
+                y += rowH + rowGap;
+                Text(L"The camera opens only while recording, streaming or the replay buffer is "
+                     L"armed.",
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.75f));
                 break;
             }
-            case 6: {  // -------------------------------------------------- Help
+            case 6: {  // -------------------------------------------- Encoding
+                Card(x, cy, w, cardH(6), L"RECORDING ENCODER");
+                y = cy + pad + headH + 4;
+                Combo(ID_COMBO_RATE, S(x + pad, y, cw, rowH), rates_, &selRate_);
+                y += rowH + rowGap;
+                if (selRate_ == 0)
+                    Slider(ID_SLIDER_CQP, S(x + pad, y, cw, rowH), 1, 51,
+                           (int*)&settings_.cqp, L"CQ %d");
+                else
+                    Field(ID_FIELD_BITRATE, S(x + pad, y, cw, rowH), &bitrateText_, false,
+                          L"Bitrate (kbps)");
+                y += rowH + rowGap;
+                Combo(ID_COMBO_PRESET, S(x + pad, y, cw, rowH), presets_, &selPreset_);
+                y += rowH + rowGap;
+                Slider(ID_SLIDER_BFRAMES, S(x + pad, y, cw, rowH), 0, 4, &settings_.bframes,
+                       L"B-frames %d");
+                y += rowH + rowGap;
+                Toggle(ID_TOGGLE_LOOKAHEAD, S(x + pad, y, cw, rowH), L"Lookahead",
+                       &settings_.lookahead);
+                y += rowH + rowGap;
+                Toggle(ID_TOGGLE_MULTIPASS, S(x + pad, y, cw, rowH), L"Two-pass",
+                       &settings_.multipass);
+                cy += cardH(6) + cardGap;
+
+                Card(x, cy, w, cardH(6), L"STREAM ENCODER");
+                y = cy + pad + headH + 4;
+                Combo(ID_COMBO_STREAMPRESET, S(x + pad, y, cw, rowH), presets_,
+                      &selStreamPreset_);
+                y += rowH + rowGap;
+                Slider(ID_SLIDER_STREAMBFRAMES, S(x + pad, y, cw, rowH), 0, 4,
+                       &settings_.streamBframes, L"B-frames %d");
+                y += rowH + rowGap;
+                Toggle(ID_TOGGLE_STREAMLOOKAHEAD, S(x + pad, y, cw, rowH), L"Lookahead",
+                       &settings_.streamLookahead);
+                y += rowH + rowGap;
+                Toggle(ID_TOGGLE_STREAMMULTIPASS, S(x + pad, y, cw, rowH), L"Two-pass",
+                       &settings_.streamMultipass);
+                y += rowH + rowGap;
+                Text(L"CBR at the bitrate set on the Stream page", fmtSmall_,
+                     S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                y += rowH + rowGap;
+                Text(L"Two-pass: slower, better quality at the same bitrate", fmtSmall_,
+                     S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                break;
+            }
+            case 7: {  // -------------------------------------------------- Help
                 Card(x, cy, w, cardH(5), L"SHORTCUTS");
                 y = cy + pad + headH + 4;
                 std::wstring hk = L"off";
@@ -2688,36 +2909,44 @@ void UiApp::DrawSettingsPage() {
                 Text(L"Esc closes menus and leaves a text box.", fmtSmall_,
                      S(x + pad, y, cw, rowH), WithAlpha(kText, 0.85f));
                 y += rowH + rowGap;
-                Text(L"Text boxes: Ctrl+A/C/X/V, arrows, Home/End, Ctrl+arrows by word, "
-                     L"Shift+arrows to select.",
+                Text(L"Text boxes: Ctrl+A/C/X/V, arrows, Home/End, Ctrl+arrows, Shift+arrows.",
                      fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kText, 0.85f));
                 y += rowH + rowGap;
-                Text(L"Mouse: click to place the caret, drag to select, double-click a word, "
-                     L"triple-click selects all.",
+                Text(L"Mouse: drag to select, double-click a word, triple-click selects all.",
                      fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kText, 0.85f));
                 y += rowH + rowGap;
-                Text(L"Preview: drag the camera layer to move it; right-click a source row to "
-                     L"configure it.",
+                Text(L"Preview: drag the camera layer to move it.",
                      fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kText, 0.85f));
                 cy += cardH(5) + cardGap;
 
-                Card(x, cy, w, cardH(1), L"TROUBLESHOOTING");
+                Card(x, cy, w, cardH(3), L"TROUBLESHOOTING");
                 y = cy + pad + headH + 4;
                 Button(ID_OPENLOGS, S(x + pad, y, 150, rowH), L"Open Logs", BtnStyle::Ghost);
                 Button(ID_REPORT, S(x + pad + 158, y, 150, rowH), L"Report Bug",
                        BtnStyle::Ghost);
                 Button(ID_OPENFOLDER, S(x + pad + 316, y, 154, rowH), L"Open Folder",
                        BtnStyle::Ghost);
+                y += rowH + rowGap;
+                Text(L"Logs live in %LOCALAPPDATA%\\Ulticast\\logs (the newest 20 are kept).",
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                y += rowH + rowGap;
+                Text(L"Report Bug writes a redacted system report and opens the issue form.",
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
                 break;
             }
             default: {  // ---------------------------------------------- About
-                Card(x, cy, w, cardH(3), L"ABOUT");
+                Card(x, cy, w, cardH(5), L"ABOUT");
                 y = cy + pad + headH + 4;
                 Text(Format(L"Ulticast %hs  ·  %hs", ULTI_VERSION, ULTI_REPO), fmtSmall_,
                      S(x + pad, y, cw, rowH), kTextDim);
                 y += rowH + rowGap;
-                Text(L"WGC/DXGI capture, NVENC encoding, FFmpeg muxing, CEF overlays — built for "
-                     L"the RTX 3080 rig.",
+                Text(L"WGC/DXGI capture, NVENC encoding, FFmpeg muxing, CEF overlays.",
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kText, 0.85f));
+                y += rowH + rowGap;
+                Text(L"Frames stay on the GPU from capture to encoder.",
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kText, 0.85f));
+                y += rowH + rowGap;
+                Text(L"Verified by engine smoke tests and UI automation.",
                      fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kText, 0.85f));
                 y += rowH + rowGap;
                 Text(L"Report Bug collects OS/GPU/log diagnostics and opens the issue form.",
@@ -2725,14 +2954,26 @@ void UiApp::DrawSettingsPage() {
                 break;
             }
         }
+        // A short category must not leave a dead rectangle: stretch its last
+        // card down to the activity strip (its rows stay at the top).
+        const float contentBottom = 596;
+        if (lastCardW_ > 0 && lastCardH_ >= 110 &&
+            lastCardY_ + lastCardH_ + 40 < contentBottom) {
+            Card(lastCardX_, lastCardY_, lastCardW_, contentBottom - lastCardY_, lastCardTitle_);
+            // Anchor the bottom of the roomy card with a footer note: space reads
+            // as deliberate instead of empty.
+            Text(L"Saved to %APPDATA%\\Ulticast\\settings.ini", fmtSmall_,
+                 S(lastCardX_ + 14, contentBottom - 26, lastCardW_ - 28, 18),
+                 WithAlpha(kTextDim, 0.55f));
+        }
     }
 
     // ---- right column: the live preview stays visible while settings change
     {
         const float px = 732, pw = 308;
         DrawPreview(S(px, 64, pw, 173));
-        Text(L"Live preview — changes apply immediately", fmtSmall_,
-             S(px, 64 + 173 + 6, pw, 18), WithAlpha(kTextDim, 0.75f));
+        Text(L"Live preview", fmtSmall_, S(px, 64 + 173 + 6, pw, 18),
+             WithAlpha(kTextDim, 0.75f));
 
         const float sy = 64 + 173 + 30;
         Card(px, sy, pw, cardH(4), L"STATUS");
@@ -2758,7 +2999,7 @@ void UiApp::DrawSettingsPage() {
                  : L"Capture   not running",
              fmtSmall_, S(lx, y, lw, rowH), WithAlpha(kText, 0.85f));
 
-        Text(L"The preview runs while idle when \"Idle preview\" is on (Behavior).", fmtSmall_,
+        Text(L"Preview runs while idle (Behavior).", fmtSmall_,
              S(px, sy + cardH(4) + 8, pw, 18), WithAlpha(kTextDim, 0.7f));
     }
 
@@ -2778,7 +3019,7 @@ void UiApp::DrawTransport(int mode) {
     }
     if (mode != 0) {
         Button(ID_LIVE, S(x, 640, 156, 44), live ? L"End Stream" : L"Go Live",
-               live ? BtnStyle::Danger : BtnStyle::Primary);
+               live ? BtnStyle::Danger : (mode == 2 ? BtnStyle::Ghost : BtnStyle::Primary));
         x += 164;
     }
     Button(ID_PAUSE, S(x, 640, 100, 44), stats_.paused ? L"Resume" : L"Pause", BtnStyle::Ghost,
@@ -2851,7 +3092,7 @@ void UiApp::DrawPopup() {
                                        list.right - Px(4), list.top + Px(4) + Px(itemH * (vi + 1)));
         hits_.push_back({ID_ITEM_BASE + i, item, true});
         bool hovered = hover_ == ID_ITEM_BASE + i;
-        bool selected = popup_.sel && i == *popup_.sel;
+        bool selected = (popup_.sel && i == *popup_.sel) || (kbdNav_ && i == kbdItem_);
         if (hovered || selected)
             dc_->FillRoundedRectangle(D2D1::RoundedRect(item, Px(6), Px(6)),
                                       Br(WithAlpha(kAccent, selected ? 0.35f : 0.2f)));
@@ -2872,6 +3113,13 @@ void UiApp::DrawPopup() {
 void UiApp::Card(float x, float y, float w, float h, const std::wstring& title) {
     Panel(S(x, y, w, h), 12, WithAlpha(kPanel, 0.5f), true);
     Text(title, fmtSection_, S(x + 14, y + 9, w - 28, 16), WithAlpha(kTextDim, 0.95f));
+    // Remember the last card so a short category can stretch it to the bottom
+    // instead of leaving a dead rectangle under it.
+    lastCardX_ = x;
+    lastCardY_ = y;
+    lastCardW_ = w;
+    lastCardH_ = h;
+    lastCardTitle_ = title;
 }
 
 // ----------------------------------------------------------------- preview
@@ -3072,7 +3320,7 @@ void UiApp::ApplySettingsToUi() {
         us.cursor = s.cursor != 0;
         for (const UiSourceSetting& ss : s.sources) {
             UiSource u;
-            u.type = (SessionSourceType)std::clamp(ss.type, 0, 4);
+            u.type = (SessionSourceType)std::clamp(ss.type, 0, 5);
             u.enabled = ss.enabled != 0;
             u.device = ss.device;
             u.monitor = ss.monitor;
@@ -3206,7 +3454,7 @@ std::vector<SessionSource> UiApp::SceneSources(const UiScene& sc) const {
 void UiApp::EnsureSceneDefaults(UiScene& scene) const {
     bool hasCap = false, hasOut = false;
     for (const UiSource& s : scene.sources) {
-        if (s.type == SessionSourceType::Capture) hasCap = true;
+        if (IsCaptureLayer(s)) hasCap = true;
         if (s.type == SessionSourceType::AudioOut) hasOut = true;
     }
     if (!hasCap) {
@@ -3214,7 +3462,7 @@ void UiApp::EnsureSceneDefaults(UiScene& scene) const {
         c.type = SessionSourceType::Capture;
         c.enabled = true;
         c.monitor = selMonitor_;
-        if (selWindow_ > 0 && selWindow_ < (int)windows_.size()) c.window = windows_[selWindow_];
+        // Never assume a window here: a display source stays a display source.
         if (selBackend_ >= 0 && selBackend_ < (int)backendKeys_.size())
             c.dxgi = backendKeys_[selBackend_] == "dxgi";
         scene.sources.insert(scene.sources.begin(), c);
@@ -3282,9 +3530,17 @@ SessionConfig UiApp::BuildConfig() {
     cfg.window.clear();
     cfg.backend = "wgc";
     for (const UiSource& s : sc.sources) {
-        if (s.type != SessionSourceType::Capture || !s.enabled) continue;
+        if (!s.enabled) continue;
+        if (s.type == SessionSourceType::Window) {
+            cfg.windowSource = true;
+            cfg.window = s.window;
+            cfg.monitor = s.monitor;
+            cfg.backend = "wgc";
+            break;
+        }
+        if (s.type != SessionSourceType::Capture) continue;
         cfg.monitor = s.monitor;
-        cfg.window = s.window;
+        cfg.window.clear();
         cfg.backend = s.dxgi ? "dxgi" : "wgc";
         break;
     }
@@ -3528,6 +3784,186 @@ void UiApp::UpdateWindowTitleState() {
     }
 }
 
+bool* UiApp::ToggleTarget(int id) {
+    switch (id) {
+        case ID_TOGGLE_REPLAY: return &settings_.replay;
+        case ID_TOGGLE_DESKTOP: return &settings_.desktopAudio;
+        case ID_TOGGLE_MIC: return &settings_.mic;
+        case ID_TOGGLE_CHROMA: return &settings_.chroma;
+        case ID_TOGGLE_LOOKAHEAD: return &settings_.lookahead;
+        case ID_TOGGLE_MULTIPASS: return &settings_.multipass;
+        case ID_TOGGLE_IDLEPREVIEW: return &settings_.idlePreview;
+        case ID_TOGGLE_TRAYCLOSE: return &settings_.closeToTray;
+        case ID_TOGGLE_MICGATE: return &settings_.micGate;
+        case ID_TOGGLE_COMP: return &settings_.micComp;
+        case ID_TOGGLE_MONITOR: return &settings_.monitorMic;
+        case ID_TOGGLE_LIGHT: return &settings_.light;
+        case ID_TOGGLE_TRACKS: return &separateTracks_;
+        case ID_TOGGLE_FADE: return &settings_.sceneFade;
+        case ID_TOGGLE_STREAMLOOKAHEAD: return &settings_.streamLookahead;
+        case ID_TOGGLE_STREAMMULTIPASS: return &settings_.streamMultipass;
+        case ID_SRC_CURSOR:
+            return scenes_.empty() ? nullptr : &scenes_[activeScene_].cursor;
+        default:
+            if (id >= ID_SRC_TOGGLE_BASE && id < ID_SRC_TOGGLE_BASE + 64) {
+                const int i = id - ID_SRC_TOGGLE_BASE;
+                if (!scenes_.empty() && i >= 0 && i < (int)scenes_[activeScene_].sources.size())
+                    return &scenes_[activeScene_].sources[i].enabled;
+            }
+            return nullptr;
+    }
+}
+
+void UiApp::RefreshWindowCombo() {
+    // Rebuild the Settings window list, keeping the current choice selected.
+    std::wstring keep = selWindow_ > 0 && selWindow_ < (int)windows_.size() ? windows_[selWindow_]
+                                                                           : L"";
+    windows_.clear();
+    windows_.push_back(L"Full monitor");
+    for (auto& t : WgcCapture::ListWindows()) windows_.push_back(t);
+    selWindow_ = 0;
+    for (size_t i = 0; i < windows_.size(); ++i)
+        if (windows_[i] == keep) selWindow_ = (int)i;
+}
+
+void UiApp::FocusNextControl(bool back) {
+    std::vector<int> order;
+    for (const Hit& h : hits_) {
+        if (!h.enabled || h.id == 0) continue;
+        if (h.id >= ID_ITEM_BASE && h.id < ID_ITEM_BASE + 64) continue;  // popups use arrows
+        bool dup = false;
+        for (int id : order)
+            if (id == h.id) {
+                dup = true;
+                break;
+            }
+        if (!dup) order.push_back(h.id);
+    }
+    if (order.empty()) return;
+    int cur = -1;
+    for (size_t i = 0; i < order.size(); ++i)
+        if (order[i] == kbdFocus_) cur = (int)i;
+    const int n = (int)order.size();
+    const int next = cur < 0 ? (back ? n - 1 : 0) : (back ? (cur - 1 + n) % n : (cur + 1) % n);
+    kbdFocus_ = order[next];
+    kbdNav_ = true;
+    if (std::wstring* t = FieldTarget(kbdFocus_)) {
+        focus_ = kbdFocus_;  // a field takes the caret so typing goes there
+        EditBind(t);
+    } else {
+        focus_ = 0;
+        edit_.text = nullptr;
+    }
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void UiApp::ActivateControl(int id) {
+    if (!id) return;
+    if (bool* t = ToggleTarget(id)) {
+        *t = !*t;
+        SyncSettingsFromUi();
+        SaveUiSettings(settings_);
+        OnAction(id);
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+    if (comboRects_.count(id)) {
+        openCombo_ = (openCombo_ == id) ? -1 : id;
+        popupScroll_ = 0;
+        kbdItem_ = 0;
+        if (openCombo_ == ID_COMBO_WINDOW) RefreshWindowCombo();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+    OnAction(id);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void UiApp::DrawFocusRing() {
+    if (!kbdNav_ || !kbdFocus_) return;
+    D2D1_RECT_F r{};
+    bool found = false;
+    for (auto it = hits_.rbegin(); it != hits_.rend(); ++it) {
+        if (it->id == kbdFocus_ && it->enabled) {
+            r = it->rect;
+            found = true;
+            break;
+        }
+    }
+    if (!found) return;
+    D2D1_RECT_F ring =
+        D2D1::RectF(r.left - Px(2), r.top - Px(2), r.right + Px(2), r.bottom + Px(2));
+    dc_->DrawRoundedRectangle(D2D1::RoundedRect(ring, Px(9), Px(9)), Br(kAccent), Px(2));
+}
+
+void UiApp::CommitPopupItem(int index) {
+    // Shared by mouse clicks and keyboard Enter on the highlighted item.
+    if (openAction_) {
+        const int act = openAction_;
+        openAction_ = 0;
+        if (act == ID_ADD_SOURCE) {
+            BeginAddSource(index);
+        } else if (act == ID_WINDOW_PICK) {
+            const int pick = index;
+            if (pickMode_ == PickMode::AddWindow || pickMode_ == PickMode::AddMonitor) {
+                const int menu = pendingAdd_;
+                const std::wstring text = (pick >= 0 && pick < (int)pickItems_.size())
+                                              ? pickItems_[pick]
+                                              : std::wstring();
+                pickMode_ = PickMode::None;
+                pendingAdd_ = -1;
+                if (menu >= 0 && (menu != 1 || !text.empty())) AddSourceAt(menu, pick, text);
+            } else if (pickMode_ == PickMode::SwitchWindow) {
+                if (actionSource_ >= 0 &&
+                    actionSource_ < (int)scenes_[activeScene_].sources.size() && pick >= 0 &&
+                    pick < (int)pickItems_.size()) {
+                    UiSource& s = scenes_[activeScene_].sources[actionSource_];
+                    // Choosing a window makes the source a window source.
+                    s.type = SessionSourceType::Window;
+                    s.window = pickItems_[pick];
+                    SyncSettingsFromUi();
+                    SaveUiSettings(settings_);
+                    PushSceneSources();
+                    RestartPreview();
+                    statusText_ = L"Now capturing: " + pickItems_[pick];
+                    statusError_ = false;
+                    if (sessionRunning_ && !previewSession_) {
+                        statusText_ = L"Capture source changed — press Stop/Start to apply";
+                        statusError_ = false;
+                    }
+                }
+                pickMode_ = PickMode::None;
+            }
+        } else {
+            ApplySourceProperty(act - ID_SRC_PROP_BASE, index);
+        }
+        return;
+    }
+    if (openCombo_ >= 0 && index >= 0 && index < (int)popup_.items.size()) {
+        if (popup_.sel) *popup_.sel = index;
+        if (openCombo_ == ID_COMBO_MONITOR || openCombo_ == ID_COMBO_WINDOW ||
+            openCombo_ == ID_COMBO_BACKEND || openCombo_ == ID_COMBO_FPS ||
+            openCombo_ == ID_COMBO_GPU)
+            RestartPreview();
+        if (openCombo_ == ID_COMBO_HOTKEY) {
+            // Re-register the global clip hotkey with the new choice.
+            UnregisterHotKey(hwnd_, 1);
+            if (selHotkey_ >= 0 && selHotkey_ < (int)hotkeyValues_.size() &&
+                hotkeyValues_[selHotkey_] != 0)
+                RegisterHotKey(hwnd_, 1, 0, hotkeyValues_[selHotkey_]);
+            SyncSettingsFromUi();
+            SaveUiSettings(settings_);
+            statusText_ = L"Clip hotkey updated";
+            statusError_ = false;
+        }
+        if (openCombo_ == ID_COMBO_CONTAINER || openCombo_ == ID_COMBO_STREAMPRESET) {
+            SyncSettingsFromUi();
+            SaveUiSettings(settings_);
+        }
+    }
+    openCombo_ = -1;
+}
+
 void UiApp::OnAction(int id) {
     if (id >= ID_SCENE_BASE && id < ID_SCENE_BASE + 64) {
         int index = id - ID_SCENE_BASE;
@@ -3569,56 +4005,7 @@ void UiApp::OnAction(int id) {
         return;
     }
     if (id >= ID_ITEM_BASE && id < ID_ITEM_BASE + 64) {
-        int index = id - ID_ITEM_BASE;
-        if (openAction_) {
-            const int act = openAction_;
-            openAction_ = 0;
-            if (act == ID_ADD_SOURCE) {
-                AddSourceAt(index);
-            } else if (act == ID_WINDOW_PICK) {
-                if (actionSource_ >= 0 &&
-                    actionSource_ < (int)scenes_[activeScene_].sources.size() &&
-                    index >= 0 && index < (int)windowPickItems_.size()) {
-                    UiSource& s = scenes_[activeScene_].sources[actionSource_];
-                    s.window = index == 0 ? std::wstring() : windowPickItems_[index];
-                    SyncSettingsFromUi();
-                    SaveUiSettings(settings_);
-                    PushSceneSources();
-                    RestartPreview();
-                    if (sessionRunning_ && !previewSession_) {
-                        statusText_ = L"Capture source changed — press Stop/Start to apply";
-                        statusError_ = false;
-                    }
-                }
-            } else {
-                ApplySourceProperty(act - ID_SRC_PROP_BASE, index);
-            }
-            InvalidateRect(hwnd_, nullptr, FALSE);
-            return;
-        }
-            if (openCombo_ >= 0 && index >= 0 && index < (int)popup_.items.size()) {
-            if (popup_.sel) *popup_.sel = index;
-            if (openCombo_ == ID_COMBO_MONITOR || openCombo_ == ID_COMBO_WINDOW ||
-                openCombo_ == ID_COMBO_BACKEND || openCombo_ == ID_COMBO_FPS ||
-                openCombo_ == ID_COMBO_GPU)
-                RestartPreview();
-            if (openCombo_ == ID_COMBO_HOTKEY) {
-                // Re-register the global clip hotkey with the new choice.
-                UnregisterHotKey(hwnd_, 1);
-                if (selHotkey_ >= 0 && selHotkey_ < (int)hotkeyValues_.size() &&
-                    hotkeyValues_[selHotkey_] != 0)
-                    RegisterHotKey(hwnd_, 1, 0, hotkeyValues_[selHotkey_]);
-                SyncSettingsFromUi();
-                SaveUiSettings(settings_);
-                statusText_ = L"Clip hotkey updated";
-                statusError_ = false;
-            }
-            if (openCombo_ == ID_COMBO_CONTAINER || openCombo_ == ID_COMBO_STREAMPRESET) {
-                SyncSettingsFromUi();
-                SaveUiSettings(settings_);
-            }
-        }
-        openCombo_ = -1;
+        CommitPopupItem(id - ID_ITEM_BASE);
         InvalidateRect(hwnd_, nullptr, FALSE);
         return;
     }
@@ -3972,7 +4359,9 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_GETMINMAXINFO: {
             auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
-            const float s = (dpi_ ? dpi_ : 96) / 96.0f * 0.62f;  // smallest zoom-to-fit size
+            // Never shrink the design below 85%: the zoom-to-fit would otherwise
+            // make text unreadable instead of adapting.
+            const float s = (dpi_ ? dpi_ : 96) / 96.0f * 0.85f;
             mmi->ptMinTrackSize.x = (LONG)(kWinW * s);
             mmi->ptMinTrackSize.y = (LONG)(kWinH * s);
             return 0;
@@ -4043,6 +4432,7 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_LBUTTONDOWN: {
             float x = (float)GET_X_LPARAM(lp), y = (float)GET_Y_LPARAM(lp);
+            kbdNav_ = false;  // the mouse takes over: hide the keyboard ring
             press_ = 0;
             for (auto it = hits_.rbegin(); it != hits_.rend(); ++it) {
                 if (it->enabled && x >= it->rect.left && x < it->rect.right && y >= it->rect.top &&
@@ -4051,6 +4441,7 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     break;
                 }
             }
+            if (press_) kbdFocus_ = press_;  // clicking focuses, so arrows/Enter work next
             // A click that is not on the open popup (its items are hits) or on the
             // popup's own button closes it -- no more "stuck" menus. Escape too.
             const bool onPopupItem = press_ >= ID_ITEM_BASE && press_ < ID_ITEM_BASE + 64;
@@ -4130,42 +4521,6 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
 
-            // toggles act immediately
-            for (int tid : {ID_TOGGLE_REPLAY, ID_TOGGLE_DESKTOP, ID_TOGGLE_MIC,
-                            ID_TOGGLE_CHROMA, ID_TOGGLE_LOOKAHEAD, ID_TOGGLE_MULTIPASS,
-                            ID_TOGGLE_IDLEPREVIEW, ID_TOGGLE_TRAYCLOSE, ID_TOGGLE_MICGATE,
-                            ID_TOGGLE_COMP, ID_TOGGLE_LIGHT, ID_TOGGLE_MONITOR, ID_TOGGLE_TRACKS,
-                            ID_TOGGLE_FADE, ID_TOGGLE_STREAMLOOKAHEAD, ID_TOGGLE_STREAMMULTIPASS,
-                            ID_SRC_CURSOR}) {
-                if (press_ == tid) {
-                    bool* target = nullptr;
-                    switch (tid) {
-                        case ID_TOGGLE_REPLAY: target = &settings_.replay; break;
-                        case ID_TOGGLE_DESKTOP: target = &settings_.desktopAudio; break;
-                        case ID_TOGGLE_MIC: target = &settings_.mic; break;
-                        case ID_TOGGLE_CHROMA: target = &settings_.chroma; break;
-                        case ID_TOGGLE_LOOKAHEAD: target = &settings_.lookahead; break;
-                        case ID_TOGGLE_MULTIPASS: target = &settings_.multipass; break;
-                        case ID_TOGGLE_IDLEPREVIEW: target = &settings_.idlePreview; break;
-                        case ID_TOGGLE_TRAYCLOSE: target = &settings_.closeToTray; break;
-                        case ID_TOGGLE_MICGATE: target = &settings_.micGate; break;
-                        case ID_TOGGLE_COMP: target = &settings_.micComp; break;
-                        case ID_TOGGLE_MONITOR: target = &settings_.monitorMic; break;
-                        case ID_TOGGLE_LIGHT: target = &settings_.light; break;
-                        case ID_TOGGLE_TRACKS: target = &separateTracks_; break;
-                        case ID_TOGGLE_FADE: target = &settings_.sceneFade; break;
-                        case ID_TOGGLE_STREAMLOOKAHEAD: target = &settings_.streamLookahead; break;
-                        case ID_TOGGLE_STREAMMULTIPASS: target = &settings_.streamMultipass; break;
-                        case ID_SRC_CURSOR: target = &scenes_[activeScene_].cursor; break;
-                    }
-                    if (target) *target = !*target;
-                    SyncSettingsFromUi();
-                    SaveUiSettings(settings_);
-                    OnAction(tid);
-                    press_ = 0;
-                }
-            }
-
             // scene source rows: enable/disable applies immediately
             if (press_ >= ID_SRC_TOGGLE_BASE && press_ < ID_SRC_TOGGLE_BASE + 64) {
                 const int i = press_ - ID_SRC_TOGGLE_BASE;
@@ -4183,23 +4538,23 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 press_ = 0;
             }
 
+            // toggles act immediately (source rows are handled above)
+            if (press_ < ID_SRC_TOGGLE_BASE || press_ >= ID_SRC_TOGGLE_BASE + 64) {
+                if (bool* target = ToggleTarget(press_)) {
+                    *target = !*target;
+                    SyncSettingsFromUi();
+                    SaveUiSettings(settings_);
+                    OnAction(press_);
+                    press_ = 0;
+                }
+            }
+
             // combos open/close
             for (auto& [id, rect] : comboRects_) {
                 if (press_ == id) {
                     openCombo_ = (openCombo_ == id) ? -1 : id;
                     popupScroll_ = 0;
-                    if (openCombo_ == ID_COMBO_WINDOW) {
-                        // refresh the window list on open
-                        std::wstring keep = selWindow_ > 0 && selWindow_ < (int)windows_.size()
-                                                ? windows_[selWindow_]
-                                                : L"";
-                        windows_.clear();
-                        windows_.push_back(L"Full monitor");
-                        for (auto& t : WgcCapture::ListWindows()) windows_.push_back(t);
-                        selWindow_ = 0;
-                        for (size_t i = 0; i < windows_.size(); ++i)
-                            if (windows_[i] == keep) selWindow_ = (int)i;
-                    }
+                    if (openCombo_ == ID_COMBO_WINDOW) RefreshWindowCombo();
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
             }
@@ -4268,8 +4623,50 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 openCombo_ = -1;
                 focus_ = 0;
                 edit_.text = nullptr;
+                kbdNav_ = false;
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
+            }
+            // Open popups own the arrows and Enter.
+            if (openCombo_ >= 0 || openAction_) {
+                const int total = (int)popup_.items.size();
+                if (wp == VK_DOWN || wp == VK_UP) {
+                    if (total > 0) {
+                        kbdItem_ = std::clamp(kbdItem_ + (wp == VK_DOWN ? 1 : -1), 0, total - 1);
+                        popupScroll_ = std::clamp(kbdItem_ - 2, 0, (std::max)(0, total - 6));
+                        kbdNav_ = true;
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                    }
+                    return 0;
+                }
+                if (wp == VK_RETURN && total > 0) {
+                    CommitPopupItem(kbdItem_);
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
+            }
+            if (wp == VK_TAB) {
+                FocusNextControl((GetKeyState(VK_SHIFT) & 0x8000) != 0);
+                return 0;
+            }
+            // Enter/Space activate the focused control (not while typing).
+            if ((wp == VK_RETURN || wp == VK_SPACE) && !focus_ && kbdFocus_) {
+                ActivateControl(kbdFocus_);
+                return 0;
+            }
+            // Arrow keys adjust a focused slider.
+            if ((wp == VK_LEFT || wp == VK_RIGHT) && !focus_ && kbdFocus_) {
+                auto rng = sliderRange_.find(kbdFocus_);
+                auto val = sliderValue_.find(kbdFocus_);
+                if (rng != sliderRange_.end() && val != sliderValue_.end() && val->second) {
+                    const int step = (std::max)(1, (rng->second.second - rng->second.first) / 40);
+                    *val->second = std::clamp(*val->second + (wp == VK_RIGHT ? step : -step),
+                                              rng->second.first, rng->second.second);
+                    SyncSettingsFromUi();
+                    SaveUiSettings(settings_);
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
             }
             std::wstring* target = FieldTarget(focus_);
             if (!target) return 0;

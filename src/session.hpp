@@ -26,7 +26,7 @@
 
 // A source placed in the scene, in canvas pixels. w/h == 0 means "use the
 // source's default size" (full canvas for capture/browser, PiP for video).
-enum class SessionSourceType { Capture, Webcam, Browser, AudioIn, AudioOut };
+enum class SessionSourceType { Capture, Webcam, Browser, AudioIn, AudioOut, Window };
 
 struct SessionSource {
     SessionSourceType type = SessionSourceType::Capture;
@@ -49,6 +49,7 @@ struct SessionConfig {
     // capture
     int monitor = 0;
     std::wstring window;            // non-empty = window capture
+    bool windowSource = false;      // the source is a window capture (window must be set)
     std::string backend = "auto";   // auto | wgc | dxgi
     uint32_t fps = 60;
     int adapter = -1;

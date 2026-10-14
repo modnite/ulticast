@@ -147,7 +147,7 @@ static bool ParseScene(const std::string& val, UiSceneSetting* sc) {
                 if (f.size() < 3) continue;
                 UiSourceSetting src;
                 src.type = atoi(f[0].c_str());
-                if (src.type < 0 || src.type > 4) src.type = 0;
+                if (src.type < 0 || src.type > 5) src.type = 0;  // 5 = window source
                 src.device = f[1];
                 src.enabled = f[2] == "0" ? 0 : 1;
                 if (f.size() > 3) src.monitor = atoi(f[3].c_str());

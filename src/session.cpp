@@ -156,7 +156,15 @@ bool Session::Start(const SessionConfig& cfg, std::string* err) {
     // only used when the user explicitly picks it.
     if (backend.empty() || backend == "auto") backend = "wgc";
 
-    if (!cfg_.window.empty()) {
+    if (cfg_.windowSource && cfg_.window.empty()) {
+        // A window source without a chosen window must never fall back to
+        // capturing the whole monitor -- that is a different source entirely.
+        *err = "window source has no window selected";
+        Log("[capture] %s", err->c_str());
+        Stop();
+        return false;
+    }
+    if (cfg_.windowSource || !cfg_.window.empty()) {
         usingDxgi_ = false;
         if (!cap_.StartWindow(cfg_.window, d3d_.device.Get(), cb, err, cfg_.showCursor)) {
             Stop();
@@ -362,9 +370,15 @@ Session::VideoLayer* Session::FindVideo(const std::string& device) {
 void Session::StartExtraCaptures() {
     int captureIdx = 0;
     for (const auto& s : cfg_.sources) {
-        if (s.type != SessionSourceType::Capture || !s.enabled) continue;
+        if (s.type != SessionSourceType::Capture && s.type != SessionSourceType::Window) continue;
+        if (!s.enabled) continue;
         ++captureIdx;
         if (captureIdx == 1) continue;  // the first capture drives the frame tick
+        if (s.type == SessionSourceType::Window && s.window.empty()) {
+            // No window chosen yet: skip the layer instead of capturing a monitor.
+            Log("[capture] extra window layer skipped: no window selected");
+            continue;
+        }
 
         auto e = std::make_unique<ExtraCapture>();
         e->monitor = s.monitor;
@@ -376,7 +390,8 @@ void Session::StartExtraCaptures() {
             ep->pending = t;  // AddRef via ComPtr: the frame outlives the callback
         };
         std::string err;
-        const bool ok = !e->window.empty()
+        const bool isWindow = s.type == SessionSourceType::Window || !e->window.empty();
+        const bool ok = isWindow
                             ? e->cap->StartWindow(e->window, d3d_.device.Get(), cb, &err,
                                                   cfg_.showCursor)
                             : e->cap->StartMonitor(e->monitor, d3d_.device.Get(), cb, &err,
@@ -385,7 +400,7 @@ void Session::StartExtraCaptures() {
             Log("[capture] extra layer failed: %s", err.c_str());
             continue;
         }
-        Log("[capture] extra layer: %s", e->window.empty() ? "monitor" : "window");
+        Log("[capture] extra layer: %s", isWindow ? "window" : "monitor");
         extraCaps_.push_back(std::move(e));
     }
 }
@@ -967,7 +982,7 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
     for (const auto& s : sources) {
         if (!s.enabled || layerCount >= 8) continue;
 
-        if (s.type == SessionSourceType::Capture) {
+        if (s.type == SessionSourceType::Capture || s.type == SessionSourceType::Window) {
             const int ci = captureIdx++;
             if (ci == 0) {
                 ID3D11ShaderResourceView* base =

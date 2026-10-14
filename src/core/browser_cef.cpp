@@ -2,6 +2,8 @@
 #include "diag.hpp"
 #include "log.hpp"
 
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <filesystem>
 #include <functional>
@@ -27,6 +29,14 @@ std::mutex g_mu;
 CefRefPtr<CefApp> g_app;
 CefRefPtr<CefBrowser> g_browser;
 CefRefPtr<class OverlayClient> g_client;
+// Browser lifetime: the close is asynchronous, so shutdown waits for
+// OnBeforeClose before calling CefShutdown (otherwise Chromium waits forever
+// and the process never exits). Identity is tracked by CefBrowser's integer
+// identifier: CEF hands out different interface pointers for the same browser
+// (OnAfterCreated vs OnBeforeClose), so raw pointer comparison is unreliable.
+bool g_browserAlive = false;
+int g_browserId = 0;
+std::condition_variable g_browserGone;
 
 std::wstring ExeDir() {
     wchar_t path[MAX_PATH] = {};
@@ -91,13 +101,24 @@ public:
     void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
         std::lock_guard<std::mutex> lock(g_mu);
         g_browser = browser;
+        g_browserId = browser->GetIdentifier();
+        g_browserAlive = true;
+        Diag::Log("[browser] browser created (id %d)", g_browserId);
     }
-    bool DoClose(CefRefPtr<CefBrowser>) override { return false; }
+    bool DoClose(CefRefPtr<CefBrowser>) override { return false; }  // windowless: destroy now
     void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
-        std::lock_guard<std::mutex> lock(g_mu);
-        // Only clear our reference if it is still the browser being closed:
-        // a Stop/Start cycle can have created a newer one.
-        if (g_browser && g_browser.get() == browser.get()) g_browser = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_mu);
+            // Only clear our reference if it is still the browser being closed:
+            // a Stop/Start cycle can have created a newer one.
+            if (browser->GetIdentifier() == g_browserId) {
+                g_browser = nullptr;
+                g_browserId = 0;
+                g_browserAlive = false;
+                Diag::Log("[browser] browser closed");
+            }
+        }
+        g_browserGone.notify_all();
     }
 
     // CefLoadHandler: report the outcome so a blank overlay is never silent.
@@ -156,13 +177,29 @@ void BrowserOverlay::ShutdownGlobal() {
         std::lock_guard<std::mutex> lock(g_mu);
         browser = g_browser;
         client = g_client;
-        g_browser = nullptr;
         g_client = nullptr;
     }
     if (browser) browser->GetHost()->CloseBrowser(true);
+    // Wait for OnBeforeClose: with a multi-threaded message loop CefShutdown
+    // blocks until every browser is gone, so calling it right after
+    // CloseBrowser(true) leaves the process hanging with no window on screen.
+    {
+        std::unique_lock<std::mutex> lock(g_mu);
+        if (g_browserAlive &&
+            !g_browserGone.wait_for(lock, std::chrono::seconds(5),
+                                    [] { return !g_browserAlive; }))
+            Diag::Log("[browser] overlay close timed out; shutting down anyway");
+        g_browser = nullptr;
+        g_browserId = 0;
+        g_browserAlive = false;
+    }
     // CefShutdown must not run while holding g_mu: CEF's UI thread callbacks
     // (OnAfterCreated/OnBeforeClose) also take it.
-    if (g_initialized.exchange(false)) CefShutdown();
+    if (g_initialized.exchange(false)) {
+        Diag::Log("[browser] stopping the runtime");
+        CefShutdown();
+        Diag::Log("[browser] runtime stopped");
+    }
 }
 
 bool BrowserOverlay::Start(const std::string& url, int width, int height, std::string* err) {
@@ -245,12 +282,25 @@ void BrowserOverlay::Stop() {
         std::lock_guard<std::mutex> lock(sink_->mu);
         sink_->fn = nullptr;  // the browser closes asynchronously: stop deliveries now
     }
-    std::lock_guard<std::mutex> lock(g_mu);
-    if (g_browser) {
-        g_browser->GetHost()->CloseBrowser(true);
-        g_browser = nullptr;
+    CefRefPtr<CefBrowser> browser;
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        browser = g_browser;
+        g_client = nullptr;
     }
-    g_client = nullptr;
+    if (browser) {
+        browser->GetHost()->CloseBrowser(true);
+        // The close is asynchronous (OnBeforeClose runs on CEF's UI thread).
+        // Wait so a Stop/Start cycle cannot race the old browser's teardown.
+        std::unique_lock<std::mutex> lock(g_mu);
+        if (!g_browserGone.wait_for(lock, std::chrono::seconds(3),
+                                    [] { return !g_browserAlive; })) {
+            Diag::Log("[browser] overlay close timed out in Stop()");
+            g_browser = nullptr;
+            g_browserId = 0;
+            g_browserAlive = false;
+        }
+    }
 }
 
 void BrowserOverlay::OnPaintFrame(const void* buffer, int width, int height) {

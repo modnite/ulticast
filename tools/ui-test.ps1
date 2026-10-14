@@ -142,6 +142,17 @@ function KeyDown($hwnd, [int]$vk) {
     [UlticastUiTest]::PostMessage($hwnd, 0x0100, [IntPtr]$vk, [IntPtr]1) | Out-Null
     Start-Sleep -Milliseconds 80
 }
+function StartUi {
+    $proc = Start-Process -FilePath $Exe -PassThru
+    $hwnd = [IntPtr]::Zero
+    for ($i = 0; $i -lt 40 -and $hwnd -eq [IntPtr]::Zero; $i++) {
+        Start-Sleep -Milliseconds 500
+        if ($proc.HasExited) { break }
+        $proc.Refresh()
+        if ($proc.MainWindowHandle -ne [IntPtr]::Zero) { $hwnd = $proc.MainWindowHandle }
+    }
+    return @{ proc = $proc; hwnd = $hwnd }
+}
 
 Write-Host "Ulticast UI automation" -ForegroundColor Cyan
 Write-Host "binary: $Exe"
@@ -188,23 +199,23 @@ Check 'stream tab becomes active (accent fill moves)' ((Dist $streamTab $recordT
       "stream=$($streamTab.r),$($streamTab.g),$($streamTab.b) record=$($recordTab.r),$($recordTab.g),$($recordTab.b)"
 
 Click $hwnd 480 27
+Click $hwnd 100 201           # Settings > Appearance category
 $settings = Shot $hwnd '03-settings'
-# Fresh profile => one scene => the left column is CAPTURE(3 rows), CAMERA & AUDIO(4),
-# APPEARANCE(1) starting at y=413 with its row at y=445..477.
-$swatch0 = Sample $settings 43 461
-$swatch1 = Sample $settings 77 461
+# Categories rail: Appearance shows the accent row (swatch 1 at x=206..232).
+$swatch0 = Sample $settings 219 112
+$swatch1 = Sample $settings 253 112
 Check 'settings page shows accent swatches' ((IsViolet $swatch0) -and (IsCyan $swatch1)) `
       "violet=$($swatch0.r),$($swatch0.g),$($swatch0.b) cyan=$($swatch1.r),$($swatch1.g),$($swatch1.b)"
 
 # ---------------------------------------------------------------- theme -----
-Click $hwnd 77 461
+Click $hwnd 253 112
 $cyan = Shot $hwnd '04-theme-cyan'
 $dotCyan = Sample $cyan 30 26
 Check 'picking the cyan accent repaints the UI' (IsCyan $dotCyan) `
       "rgb=$($dotCyan.r),$($dotCyan.g),$($dotCyan.b)"
 Check 'accent choice persists to settings.ini' ((SettingValue 'accent') -eq '1') `
       "accent=$(SettingValue 'accent')"
-Click $hwnd 43 461
+Click $hwnd 219 112
 $violet = Shot $hwnd '05-theme-violet'
 $dotBack = Sample $violet 30 26
 Check 'picking violet restores the default accent' (IsViolet $dotBack) `
@@ -247,13 +258,47 @@ Check 'text field: name restored' ((SceneName) -eq 'Game') "name=$(SceneName)"
 # "Test overlay" must write the demo page, wire it into the active scene and
 # persist it -- one click answers "does the overlay work?".
 Click $hwnd 480 27            # Settings page
-Click $hwnd 105 580           # Test overlay
+Click $hwnd 100 241           # Browser category
+Click $hwnd 281 149           # Test overlay
 $url = SettingValue 'browserUrl'
 Check 'browser overlay: Test overlay wires the demo page' `
       ($url -ne $null -and $url.Contains('overlay-test.html')) "browserUrl=$url"
 $scene = SettingValue 'scene0'
 Check 'browser overlay: a Browser source is added to the scene' `
       ($scene -ne $null -and $scene.Contains(';2:')) "scene0=$scene"
+
+# ---------------------------------------------------------------- preview ----
+# The Settings page keeps the live preview visible (VLC-redesign lesson: never
+# hide the picture while tweaking). The animated test overlay makes "is it
+# live?" measurable: two shots a second apart must differ.
+$p1 = Shot $hwnd '11-preview-a'
+Start-Sleep -Milliseconds 900
+$p2 = Shot $hwnd '12-preview-b'
+$changed = 0
+foreach ($px in 745, 790, 835, 880, 925, 970, 1015) {
+    foreach ($py in 150, 200, 228) {
+        if ((Dist (Sample $p1 $px $py) (Sample $p2 $px $py)) -gt 25) { $changed++ }
+    }
+}
+Check 'settings page keeps a live preview' ($changed -ge 1) "changed=$changed"
+
+# ---------------------------------------------------------------- presets ---
+# Friendly mic-filter presets instead of raw numbers.
+Click $hwnd 100 161           # Filters category
+Click $hwnd 454 112           # Voice
+$gate = SettingValue 'micGate'; $gateDb = SettingValue 'micGateDb'
+$comp = SettingValue 'micComp'; $compDb = SettingValue 'micCompDb'
+$ratio = SettingValue 'micCompRatio'
+Check 'mic preset: Voice sets gate + compressor' `
+      ($gate -eq '1' -and $gateDb -eq '-50' -and $comp -eq '1' -and $compDb -eq '-18' -and $ratio -eq '30') `
+      "gate=$gate/$gateDb comp=$comp/$compDb ratio=$ratio"
+Click $hwnd 622 112           # Broadcast
+$gateDb2 = SettingValue 'micGateDb'
+Check 'mic preset: Broadcast is denser' ($gateDb2 -eq '-45') "gateDb=$gateDb2"
+Click $hwnd 286 112           # Off
+Check 'mic preset: Off disables both' ((SettingValue 'micGate') -eq '0') `
+      "micGate=$(SettingValue 'micGate')"
+
 Click $hwnd 284 27            # back to Record for the picker checks
 
 # ---------------------------------------------------------------- pickers ---
@@ -269,18 +314,46 @@ Check 'separate mic track toggle persists' ($tracks -eq '2') "audioTracks=$track
 
 # ---------------------------------------------------------------- behavior --
 Click $hwnd 480 27
-Click $hwnd 650 341
+Click $hwnd 100 281           # Behavior category
+Click $hwnd 316 149           # scene fade toggle
 $fadeOff = SettingValue 'sceneFade'
-Click $hwnd 650 341
+Click $hwnd 316 149
 $fadeOn = SettingValue 'sceneFade'
 Check 'scene fade toggle persists both ways' ($fadeOff -eq '0' -and $fadeOn -eq '1') `
       "off=$fadeOff on=$fadeOn"
 
-# ---------------------------------------------------------------- shutdown --
+# ------------------------------------------------------------ tray & exit ---
+# Reported: "doesn't gracefully exit or clear from the system tray on close".
+# With the browser overlay live: Close-to-tray keeps the app running, and Exit
+# from the tray menu must quit promptly (the browser lifecycle must not hang).
+Click $hwnd 565 112           # Close to tray (row 1, second toggle)
+Check 'close to tray can be enabled' ((SettingValue 'closeToTray') -eq '1') `
+      "closeToTray=$(SettingValue 'closeToTray')"
 [UlticastUiTest]::PostMessage($hwnd, 0x0010, [IntPtr]0, [IntPtr]0) | Out-Null
-$exited = $proc.WaitForExit(8000)
-Check 'X (WM_CLOSE) exits the app' $exited 'process still running'
+Start-Sleep -Milliseconds 900
+$proc.Refresh()
+Check 'X hides to the tray instead of exiting' (-not $proc.HasExited) 'process exited on X'
+[UlticastUiTest]::PostMessage($hwnd, 0x0111, [IntPtr]9006, [IntPtr]0) | Out-Null
+$exited = $proc.WaitForExit(10000)
+Check 'tray Exit quits cleanly with the overlay live' $exited 'still running after 10 s'
 if (-not $exited) { Stop-Process -Id $proc.Id -Force }
+
+# ---------------------------------------------------------------- shutdown --
+# Plain X (the default) must exit the app.
+$again = StartUi
+if ($again.hwnd -eq [IntPtr]::Zero) {
+    Check 'X (WM_CLOSE) exits the app' $false 'relaunch produced no window'
+} else {
+    $proc = $again.proc
+    $hwnd = $again.hwnd
+    Click $hwnd 480 27
+    Click $hwnd 100 281
+    Click $hwnd 565 112           # turn Close to tray back off
+    [UlticastUiTest]::PostMessage($hwnd, 0x0010, [IntPtr]0, [IntPtr]0) | Out-Null
+    $exited = $proc.WaitForExit(8000)
+    Check 'X (WM_CLOSE) exits the app' $exited 'process still running'
+    if (-not $exited) { Stop-Process -Id $proc.Id -Force }
+}
 
 Remove-Item $profileDir -Recurse -Force -ErrorAction SilentlyContinue
 

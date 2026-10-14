@@ -124,7 +124,7 @@ jobs:
             Ulticast itself, including a tray-hidden instance).
 
             If Windows shows *"Windows protected your PC"* (SmartScreen) for the download:
-            right-click the file → **Properties** → tick **Unblock** → **OK**, or run
+            right-click the file -> **Properties** -> tick **Unblock** -> **OK**, or run
             `Unblock-File .\Ulticast-Setup-<version>.exe` in PowerShell. That removes the
             "downloaded from the internet" mark and the prompt goes away.
           files: |

@@ -232,6 +232,10 @@ enum {
     ID_FIELD_TWITCHCID,
     ID_BROWSER_TEST,
     ID_BROWSER_RELOAD,
+    ID_SETTINGS_CAT_BASE = 6100,  // +0..7 = the Settings category rail
+    ID_MIC_PRESET_OFF = 6200,
+    ID_MIC_PRESET_VOICE,
+    ID_MIC_PRESET_BROADCAST,
     ID_COMBO_CONTAINER,
     ID_TOGGLE_TRACKS,
     ID_COMBO_HOTKEY,
@@ -436,6 +440,10 @@ private:
         int lastClickField = 0;
     };
     FieldEdit edit_;
+    int clickCount_ = 0;      // 1 = caret, 2 = word, 3 = select all (native cycle)
+    POINT lastClickPt_{};     // same-spot check for multi-click
+    bool dragWordWise_ = false;   // dragging after a double click extends by words
+    bool dragSelectAll_ = false;  // dragging after a triple click keeps everything
     void EditBind(std::wstring* text);
     void EditClearSelection();
     std::wstring* EditSelectedText();  // null when there is no selection
@@ -451,6 +459,7 @@ private:
     void EditCopy(bool cut);
     void EditPaste();
     void EditSelectWordAt(int index);
+    void EditExtendWordWise(int index);  // snap the moving edge to word boundaries
     void EditEnsureCaretVisible(float viewWidthDevicePx);
     int EditCaretIndexFromX(float textOriginX, float clickX) const;
     float EditCaretX(int index) const;   // device px offset inside the text
@@ -562,6 +571,8 @@ private:
     int lastCompRatio_ = 30;
     bool lastMonitor_ = false;
     bool separateTracks_ = false;
+    bool trayBalloonShown_ = false;  // "still running in the tray" notice, once
+    int settingsCat_ = 0;            // Settings category rail selection
     void MoveSource(int index, int delta);
     std::wstring browserStatus_;  // last "[browser] ..." line (load status)
     void EnsureBrowserSource();
@@ -734,11 +745,12 @@ bool UiApp::Init(HINSTANCE instance) {
 
 void UiApp::Shutdown() {
     exiting_ = true;
+    Diag::Log("[exit] shutting down");
     if (twitchThread_.joinable()) twitchThread_.join();
     if (hwnd_) {
         KillTimer(hwnd_, kTimerId);
         UnregisterHotKey(hwnd_, 1);
-        if (nid_.cbSize) {
+        if (nid_.cbSize) {  // normally already removed in WM_DESTROY
             Shell_NotifyIconW(NIM_DELETE, &nid_);
             nid_.cbSize = 0;
         }
@@ -748,6 +760,7 @@ void UiApp::Shutdown() {
         }
     }
     session_.Stop();
+    Diag::Log("[exit] session stopped");
 }
 
 int UiApp::Run() {
@@ -1268,6 +1281,22 @@ void UiApp::EditSelectWordAt(int index) {
     }
     edit_.anchor = lo;
     edit_.caret = hi;
+}
+
+void UiApp::EditExtendWordWise(int index) {
+    // Word-granularity drag (native behaviour after a double click): the moving
+    // edge snaps to the end/start of the word under the pointer.
+    if (!edit_.text) return;
+    const std::wstring& s = *edit_.text;
+    auto isWord = [](wchar_t c) { return iswalnum(c) != 0; };
+    const int n = (int)s.size();
+    int edge = std::clamp(index, 0, n);
+    if (edit_.anchor <= index) {
+        while (edge < n && isWord(s[edge])) ++edge;  // forward: whole word included
+    } else {
+        while (edge > 0 && isWord(s[edge - 1])) --edge;  // backward: whole word included
+    }
+    edit_.caret = edge;
 }
 
 float UiApp::EditCaretX(int index) const {
@@ -2459,143 +2488,278 @@ void UiApp::DrawStreamCards() {
 
 void UiApp::DrawSettingsPage() {
     const float rowH = 32, rowGap = 5, cardGap = 12, pad = 10, headH = 18;
+    auto cardH = [&](float rows) {
+        return pad + headH + rows * rowH + (rows - 1) * rowGap + pad;
+    };
+    static const wchar_t* kCats[] = {L"Capture",  L"Camera & Audio", L"Filters",
+                                     L"Appearance", L"Browser",      L"Behavior",
+                                     L"Help",     L"About"};
+    constexpr int catCount = 8;
 
-    // ---- left column: capture defaults, devices, appearance, browser
+    // ---- category rail: one section at a time instead of a wall of cards
     {
-        const float x = 20, w = 490, cw = w - 20;
-        float cy = 64;
-
-        Card(x, cy, w, pad + headH + 3 * rowH + 2 * rowGap + pad, L"CAPTURE DEFAULTS");
-        float y = cy + pad + headH + 4;
-        Combo(ID_COMBO_MONITOR, S(x + pad, y, 300, rowH), monitors_, &selMonitor_, selWindow_ == 0);
-        Combo(ID_COMBO_FPS, S(x + pad + 318, y, cw - 318, rowH), fpss_, &selFps_);
-        y += rowH + rowGap;
-        Combo(ID_COMBO_WINDOW, S(x + pad, y, 300, rowH), windows_, &selWindow_);
-        Combo(ID_COMBO_BACKEND, S(x + pad + 318, y, cw - 318, rowH), backends_, &selBackend_);
-        y += rowH + rowGap;
-        Combo(ID_COMBO_GPU, S(x + pad, y, cw, rowH), gpus_, &selGpu_);
-        cy += pad + headH + 3 * rowH + 2 * rowGap + pad + cardGap;
-
-        Card(x, cy, w, pad + headH + 4 * rowH + 3 * rowGap + pad, L"CAMERA & AUDIO");
-        y = cy + pad + headH + 4;
-        Slider(ID_SLIDER_MICGAIN, S(x + pad, y, 226, rowH), 0, 200, &micGainPct_, L"Mic %d%%");
-        Slider(ID_SLIDER_DESKGAIN, S(x + pad + 244, y, 226, rowH), 0, 200, &deskGainPct_,
-               L"Desk %d%%");
-        y += rowH + rowGap;
-        Toggle(ID_TOGGLE_CHROMA, S(x + pad, y, 130, rowH), L"Chroma Key", &settings_.chroma);
-        Field(ID_FIELD_CHROMA, S(x + pad + 146, y, 160, rowH), &chromaText_, false, L"00FF00");
-        y += rowH + rowGap;
-        Text(L"Devices are chosen per source — click a source row on the Record/Stream page",
-             fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
-        y += rowH + rowGap;
-        Text(L"Mic gate, compressor and monitoring live in Audio Filters", fmtSmall_,
-             S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
-        cy += pad + headH + 4 * rowH + 3 * rowGap + pad + cardGap;
-
-        // APPEARANCE: accent swatches + light/dark
-        Card(x, cy, w, pad + headH + rowH + pad, L"APPEARANCE");
-        y = cy + pad + headH + 4;
-        const float sw = Px(26), swGap = Px(8);
-        float sx = S(x + pad, 0, 0, 0).left;
-        const float sy = S(0, y, 0, rowH).top + Px((rowH - 26) / 2);
-        for (int i = 0; i < kAccentCount; ++i) {
-            D2D1_RECT_F sr = D2D1::RectF(sx, sy, sx + sw, sy + sw);
-            hits_.push_back({ID_ACCENT_BASE + i, sr, true});
-            D2D1_COLOR_F c = D2D1::ColorF(kAccents[i].rgb);
-            dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F((sr.left + sr.right) / 2,
-                                                         (sr.top + sr.bottom) / 2),
-                                           sw / 2 - Px(1), sw / 2 - Px(1)),
-                             Br(c));
-            if (settings_.accent == i)
-                dc_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F((sr.left + sr.right) / 2,
-                                                             (sr.top + sr.bottom) / 2),
-                                               sw / 2 + Px(2), sw / 2 + Px(2)),
-                                 Br(kText), Px(2));
-            else if (hover_ == ID_ACCENT_BASE + i)
-                dc_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F((sr.left + sr.right) / 2,
-                                                             (sr.top + sr.bottom) / 2),
-                                               sw / 2 + Px(1), sw / 2 + Px(1)),
-                                 Br(WithAlpha(kTextDim, 0.7f)), Px(1));
-            sx += sw + swGap;
+        const float railX = 20, railW = 160, itemH = 34, itemGap = 6;
+        float ry = 64;
+        for (int i = 0; i < catCount; ++i) {
+            D2D1_RECT_F r = S(railX, ry, railW, itemH);
+            hits_.push_back({ID_SETTINGS_CAT_BASE + i, r, true});
+            const bool sel = settingsCat_ == i;
+            const bool hov = hover_ == ID_SETTINGS_CAT_BASE + i;
+            Panel(r, 8,
+                  sel ? WithAlpha(kAccent, 0.20f)
+                      : (hov ? WithAlpha(kPanel2, 0.9f) : WithAlpha(kPanel, 0.5f)),
+                  sel);
+            if (sel) dc_->FillRectangle(S(railX + 1, ry + 7, 3, itemH - 14), Br(kAccent));
+            Text(kCats[i], fmtBody_, Inset(r, 14, 0), sel ? kText : WithAlpha(kText, 0.8f));
+            ry += itemH + itemGap;
         }
-        Toggle(ID_TOGGLE_LIGHT, S(x + pad + 292, y, cw - 292, rowH), L"Light mode",
-               &settings_.light);
-        cy += pad + headH + rowH + pad + cardGap;
-
-        Card(x, cy, w, pad + headH + 2 * rowH + rowGap + pad, L"BROWSER OVERLAY");
-        y = cy + pad + headH + 4;
-        Field(ID_FIELD_BROWSER, S(x + pad, y, cw, rowH), &browserText_, false,
-              L"HTML file or https:// URL (alerts, chat, widgets)");
-        y += rowH + rowGap;
-        Button(ID_BROWSER_TEST, S(x + pad, y, 150, rowH), L"Test overlay", BtnStyle::Ghost);
-        Button(ID_BROWSER_RELOAD, S(x + pad + 158, y, 100, rowH), L"Reload", BtnStyle::Ghost,
-               sessionRunning_ && !settings_.browserUrl.empty());
-        dc_->PushAxisAlignedClip(S(x + pad + 266, y, cw - 266, rowH),
-                                 D2D1_ANTIALIAS_MODE_ALIASED);
-        Text(browserStatus_.empty() ? L"not started" : browserStatus_, fmtSmall_,
-             S(x + pad + 266, y, cw - 266, rowH),
-             browserStatus_.rfind(L"load failed", 0) == 0 ? kRec : WithAlpha(kTextDim, 0.75f));
-        dc_->PopAxisAlignedClip();
     }
 
-    // ---- right column: audio filters, encoder, behavior, misc
+    // ---- cards column: only the selected category
     {
-        const float x = 550, w = 490, cw = w - 20;
+        const float x = 196, w = 520, cw = w - 2 * pad;
         float cy = 64;
+        float y = 0;
 
-        Card(x, cy, w, pad + headH + 4 * rowH + 3 * rowGap + pad, L"AUDIO FILTERS");
-        float y = cy + pad + headH + 4;
-        Toggle(ID_TOGGLE_MICGATE, S(x + pad, y, 130, rowH), L"Noise gate", &settings_.micGate);
-        Slider(ID_SLIDER_GATEDB, S(x + pad + 146, y, cw - 146, rowH), -80, -20,
-               &settings_.micGateDb, L"%d dB");
-        y += rowH + rowGap;
-        Toggle(ID_TOGGLE_COMP, S(x + pad, y, 130, rowH), L"Compressor", &settings_.micComp);
-        Slider(ID_SLIDER_COMPDB, S(x + pad + 146, y, cw - 146, rowH), -40, -6,
-               &settings_.micCompDb, L"%d dB");
-        y += rowH + rowGap;
-        Slider(ID_SLIDER_COMPRATIO, S(x + pad, y, 226, rowH), 15, 60, &settings_.micCompRatio,
-               L"Ratio %.1f:1", 0.1f);
-        Text(L"-1 dB safety clip always on", fmtSmall_, S(x + pad + 244, y, cw - 244, rowH),
-             WithAlpha(kTextDim, 0.7f));
-        y += rowH + rowGap;
-        Toggle(ID_TOGGLE_MONITOR, S(x + pad, y, 221, rowH), L"Monitor mic", &settings_.monitorMic);
-        Text(L"headphones recommended", fmtSmall_, S(x + pad + 249, y, cw - 249, rowH),
-             WithAlpha(kTextDim, 0.7f));
-        cy += pad + headH + 4 * rowH + 3 * rowGap + pad + cardGap;
+        switch (settingsCat_) {
+            case 0: {  // ---------------------------------------------- Capture
+                Card(x, cy, w, cardH(4) + 20, L"CAPTURE DEFAULTS");
+                y = cy + pad + headH + 4;
+                Combo(ID_COMBO_MONITOR, S(x + pad, y, 300, rowH), monitors_, &selMonitor_,
+                      selWindow_ == 0);
+                Combo(ID_COMBO_FPS, S(x + pad + 312, y, cw - 312, rowH), fpss_, &selFps_);
+                y += rowH + rowGap;
+                Combo(ID_COMBO_WINDOW, S(x + pad, y, 300, rowH), windows_, &selWindow_);
+                Combo(ID_COMBO_BACKEND, S(x + pad + 312, y, cw - 312, rowH), backends_,
+                      &selBackend_);
+                y += rowH + rowGap + 20;  // advanced divider
+                Combo(ID_COMBO_GPU, S(x + pad, y, cw, rowH), gpus_, &selGpu_);
+                y += rowH + rowGap;
+                Text(L"These are defaults — every Display/Window source can pick its own monitor, "
+                     L"window and backend.",
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                break;
+            }
+            case 1: {  // --------------------------------------- Camera & Audio
+                Card(x, cy, w, cardH(4), L"CAMERA & AUDIO");
+                y = cy + pad + headH + 4;
+                Slider(ID_SLIDER_MICGAIN, S(x + pad, y, 226, rowH), 0, 200, &micGainPct_,
+                       L"Mic %d%%");
+                Slider(ID_SLIDER_DESKGAIN, S(x + pad + 244, y, 226, rowH), 0, 200,
+                       &deskGainPct_, L"Desk %d%%");
+                y += rowH + rowGap;
+                Toggle(ID_TOGGLE_CHROMA, S(x + pad, y, 130, rowH), L"Chroma Key",
+                       &settings_.chroma);
+                Field(ID_FIELD_CHROMA, S(x + pad + 146, y, 160, rowH), &chromaText_, false,
+                      L"00FF00");
+                Text(L"key colour for the camera layer", fmtSmall_,
+                     S(x + pad + 318, y, cw - 318, rowH), WithAlpha(kTextDim, 0.7f));
+                y += rowH + rowGap;
+                Text(L"Devices are chosen per source — click a source row on Record or Stream.",
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                y += rowH + rowGap;
+                Text(L"Gate, compressor and monitoring are in Filters.", fmtSmall_,
+                     S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                break;
+            }
+            case 2: {  // ---------------------------------------------- Filters
+                Card(x, cy, w, cardH(6), L"MIC FILTERS");
+                y = cy + pad + headH + 4;
+                Button(ID_MIC_PRESET_OFF, S(x + pad, y, 160, rowH), L"Off", BtnStyle::Ghost);
+                Button(ID_MIC_PRESET_VOICE, S(x + pad + 168, y, 160, rowH), L"Voice",
+                       BtnStyle::Ghost);
+                Button(ID_MIC_PRESET_BROADCAST, S(x + pad + 336, y, 160, rowH), L"Broadcast",
+                       BtnStyle::Ghost);
+                y += rowH + rowGap;
+                Toggle(ID_TOGGLE_MICGATE, S(x + pad, y, 130, rowH), L"Noise gate",
+                       &settings_.micGate);
+                Slider(ID_SLIDER_GATEDB, S(x + pad + 146, y, cw - 146, rowH), -80, -20,
+                       &settings_.micGateDb, L"%d dB");
+                y += rowH + rowGap;
+                Toggle(ID_TOGGLE_COMP, S(x + pad, y, 130, rowH), L"Compressor",
+                       &settings_.micComp);
+                Slider(ID_SLIDER_COMPDB, S(x + pad + 146, y, cw - 146, rowH), -40, -6,
+                       &settings_.micCompDb, L"%d dB");
+                y += rowH + rowGap;
+                Slider(ID_SLIDER_COMPRATIO, S(x + pad, y, 226, rowH), 15, 60,
+                       &settings_.micCompRatio, L"Ratio %.1f:1", 0.1f);
+                Text(L"-1 dB safety clip always on", fmtSmall_,
+                     S(x + pad + 244, y, cw - 244, rowH), WithAlpha(kTextDim, 0.7f));
+                y += rowH + rowGap;
+                Toggle(ID_TOGGLE_MONITOR, S(x + pad, y, 221, rowH), L"Monitor mic",
+                       &settings_.monitorMic);
+                Text(L"headphones recommended", fmtSmall_,
+                     S(x + pad + 249, y, cw - 249, rowH), WithAlpha(kTextDim, 0.7f));
+                y += rowH + rowGap;
+                Text(L"Presets set both filters; the sliders stay live while recording.",
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                break;
+            }
+            case 3: {  // ------------------------------------------- Appearance
+                Card(x, cy, w, cardH(2), L"APPEARANCE");
+                y = cy + pad + headH + 4;
+                const float sw = Px(26), swGap = Px(8);
+                float sx = S(x + pad, 0, 0, 0).left;
+                const float sy = S(0, y, 0, rowH).top + Px((rowH - 26) / 2);
+                for (int i = 0; i < kAccentCount; ++i) {
+                    D2D1_RECT_F sr = D2D1::RectF(sx, sy, sx + sw, sy + sw);
+                    hits_.push_back({ID_ACCENT_BASE + i, sr, true});
+                    D2D1_COLOR_F c = D2D1::ColorF(kAccents[i].rgb);
+                    dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F((sr.left + sr.right) / 2,
+                                                                 (sr.top + sr.bottom) / 2),
+                                                   sw / 2 - Px(1), sw / 2 - Px(1)),
+                                     Br(c));
+                    if (settings_.accent == i)
+                        dc_->DrawEllipse(
+                            D2D1::Ellipse(D2D1::Point2F((sr.left + sr.right) / 2,
+                                                        (sr.top + sr.bottom) / 2),
+                                          sw / 2 + Px(2), sw / 2 + Px(2)),
+                            Br(kText), Px(2));
+                    else if (hover_ == ID_ACCENT_BASE + i)
+                        dc_->DrawEllipse(
+                            D2D1::Ellipse(D2D1::Point2F((sr.left + sr.right) / 2,
+                                                        (sr.top + sr.bottom) / 2),
+                                          sw / 2 + Px(1), sw / 2 + Px(1)),
+                            Br(WithAlpha(kTextDim, 0.7f)), Px(1));
+                    sx += sw + swGap;
+                }
+                Toggle(ID_TOGGLE_LIGHT, S(x + pad + 292, y, cw - 292, rowH), L"Light mode",
+                       &settings_.light);
+                y += rowH + rowGap;
+                Text(L"The accent repaints instantly and is remembered next launch.", fmtSmall_,
+                     S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                break;
+            }
+            case 4: {  // ---------------------------------------------- Browser
+                Card(x, cy, w, cardH(3), L"BROWSER OVERLAY");
+                y = cy + pad + headH + 4;
+                Field(ID_FIELD_BROWSER, S(x + pad, y, cw, rowH), &browserText_, false,
+                      L"HTML file or https:// URL (alerts, chat, widgets)");
+                y += rowH + rowGap;
+                Button(ID_BROWSER_TEST, S(x + pad, y, 150, rowH), L"Test overlay",
+                       BtnStyle::Ghost);
+                Button(ID_BROWSER_RELOAD, S(x + pad + 158, y, 100, rowH), L"Reload",
+                       BtnStyle::Ghost, sessionRunning_ && !settings_.browserUrl.empty());
+                dc_->PushAxisAlignedClip(S(x + pad + 266, y, cw - 266, rowH),
+                                         D2D1_ANTIALIAS_MODE_ALIASED);
+                Text(browserStatus_.empty() ? L"not started" : browserStatus_, fmtSmall_,
+                     S(x + pad + 266, y, cw - 266, rowH),
+                     browserStatus_.rfind(L"load failed", 0) == 0 ? kRec
+                                                                  : WithAlpha(kTextDim, 0.75f));
+                dc_->PopAxisAlignedClip();
+                y += rowH + rowGap;
+                Text(L"Twitch chat: https://www.twitch.tv/embed/<channel>/chat?parent=localhost",
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                break;
+            }
+            case 5: {  // ---------------------------------------------- Behavior
+                Card(x, cy, w, cardH(4), L"BEHAVIOR");
+                y = cy + pad + headH + 4;
+                Toggle(ID_TOGGLE_IDLEPREVIEW, S(x + pad, y, 221, rowH), L"Idle preview",
+                       &settings_.idlePreview);
+                Toggle(ID_TOGGLE_TRAYCLOSE, S(x + pad + 249, y, 221, rowH), L"Close to tray",
+                       &settings_.closeToTray);
+                y += rowH + rowGap;
+                Toggle(ID_TOGGLE_FADE, S(x + pad, y, 221, rowH), L"Scene fade",
+                       &settings_.sceneFade);
+                Text(L"250 ms crossfade when switching scenes", fmtSmall_,
+                     S(x + pad + 249, y, 221, rowH), WithAlpha(kTextDim, 0.7f));
+                y += rowH + rowGap;
+                Text(L"Close to tray: the X button hides the window and keeps the app running — "
+                     L"Exit from the tray menu (right-click the icon) to quit.",
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                y += rowH + rowGap;
+                Text(L"The camera opens only while recording, streaming or replay is armed.",
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                break;
+            }
+            case 6: {  // -------------------------------------------------- Help
+                Card(x, cy, w, cardH(5), L"SHORTCUTS");
+                y = cy + pad + headH + 4;
+                std::wstring hk = L"off";
+                for (size_t i = 0; i < hotkeyValues_.size() && i < hotkeys_.size(); ++i)
+                    if (hotkeyValues_[i] == settings_.hotkey) {
+                        hk = hotkeys_[i];
+                        break;
+                    }
+                Text(Format(L"Clip hotkey: %s — change it in Record > Clips", hk.c_str()),
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kText, 0.85f));
+                y += rowH + rowGap;
+                Text(L"Esc closes menus and leaves a text box.", fmtSmall_,
+                     S(x + pad, y, cw, rowH), WithAlpha(kText, 0.85f));
+                y += rowH + rowGap;
+                Text(L"Text boxes: Ctrl+A/C/X/V, arrows, Home/End, Ctrl+arrows by word, "
+                     L"Shift+arrows to select.",
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kText, 0.85f));
+                y += rowH + rowGap;
+                Text(L"Mouse: click to place the caret, drag to select, double-click a word, "
+                     L"triple-click selects all.",
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kText, 0.85f));
+                y += rowH + rowGap;
+                Text(L"Preview: drag the camera layer to move it; right-click a source row to "
+                     L"configure it.",
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kText, 0.85f));
+                cy += cardH(5) + cardGap;
 
-        Card(x, cy, w, pad + headH + 3 * rowH + 2 * rowGap + pad, L"BEHAVIOR");
-        y = cy + pad + headH + 4;
-        Toggle(ID_TOGGLE_IDLEPREVIEW, S(x + pad, y, 221, rowH), L"Idle preview",
-               &settings_.idlePreview);
-        Toggle(ID_TOGGLE_TRAYCLOSE, S(x + pad + 249, y, 221, rowH), L"Close to tray",
-               &settings_.closeToTray);
+                Card(x, cy, w, cardH(1), L"TROUBLESHOOTING");
+                y = cy + pad + headH + 4;
+                Button(ID_OPENLOGS, S(x + pad, y, 150, rowH), L"Open Logs", BtnStyle::Ghost);
+                Button(ID_REPORT, S(x + pad + 158, y, 150, rowH), L"Report Bug",
+                       BtnStyle::Ghost);
+                Button(ID_OPENFOLDER, S(x + pad + 316, y, 154, rowH), L"Open Folder",
+                       BtnStyle::Ghost);
+                break;
+            }
+            default: {  // ---------------------------------------------- About
+                Card(x, cy, w, cardH(3), L"ABOUT");
+                y = cy + pad + headH + 4;
+                Text(Format(L"Ulticast %hs  ·  %hs", ULTI_VERSION, ULTI_REPO), fmtSmall_,
+                     S(x + pad, y, cw, rowH), kTextDim);
+                y += rowH + rowGap;
+                Text(L"WGC/DXGI capture, NVENC encoding, FFmpeg muxing, CEF overlays — built for "
+                     L"the RTX 3080 rig.",
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kText, 0.85f));
+                y += rowH + rowGap;
+                Text(L"Report Bug collects OS/GPU/log diagnostics and opens the issue form.",
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                break;
+            }
+        }
+    }
+
+    // ---- right column: the live preview stays visible while settings change
+    {
+        const float px = 732, pw = 308;
+        DrawPreview(S(px, 64, pw, 173));
+        Text(L"Live preview — changes apply immediately", fmtSmall_,
+             S(px, 64 + 173 + 6, pw, 18), WithAlpha(kTextDim, 0.75f));
+
+        const float sy = 64 + 173 + 30;
+        Card(px, sy, pw, cardH(4), L"STATUS");
+        float y = sy + pad + headH + 4;
+        const float lx = px + pad, lw = pw - 2 * pad;
+        Text(stats_.recording ? Format(L"Recording   %s", FormatTime(stats_.recSeconds).c_str())
+                              : L"Recording   idle",
+             fmtSmall_, S(lx, y, lw, rowH), stats_.recording ? kRec : WithAlpha(kTextDim, 0.8f));
         y += rowH + rowGap;
-        Toggle(ID_TOGGLE_FADE, S(x + pad, y, 221, rowH), L"Scene fade", &settings_.sceneFade);
-        Text(L"250 ms crossfade when switching scenes", fmtSmall_,
-             S(x + pad + 249, y, 221, rowH), WithAlpha(kTextDim, 0.7f));
+        Text(stats_.streaming ? Format(L"Streaming   %s", FormatTime(stats_.strSeconds).c_str())
+                              : L"Streaming   idle",
+             fmtSmall_, S(lx, y, lw, rowH),
+             stats_.streaming ? kAccent : WithAlpha(kTextDim, 0.8f));
         y += rowH + rowGap;
-        Text(L"The camera opens only while recording, streaming or replay is armed", fmtSmall_,
-             S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
-        cy += pad + headH + 3 * rowH + 2 * rowGap + pad + cardGap;
+        Text(stats_.replayArmed ? Format(L"Replay buffer   armed (%d s)", settings_.replaySeconds)
+                                : L"Replay buffer   off",
+             fmtSmall_, S(lx, y, lw, rowH),
+             stats_.replayArmed ? kText : WithAlpha(kTextDim, 0.8f));
+        y += rowH + rowGap;
+        Text(sessionRunning_ && stats_.width
+                 ? Format(L"Capture   %ux%u  ·  %s", stats_.width, stats_.height,
+                          Widen(stats_.backend).c_str())
+                 : L"Capture   not running",
+             fmtSmall_, S(lx, y, lw, rowH), WithAlpha(kText, 0.85f));
 
-        Card(x, cy, w, pad + headH + rowH + pad, L"TROUBLESHOOTING");
-        y = cy + pad + headH + 4;
-        Button(ID_OPENLOGS, S(x + pad, y, 150, rowH), L"Open Logs", BtnStyle::Ghost);
-        Button(ID_REPORT, S(x + pad + 158, y, 150, rowH), L"Report Bug", BtnStyle::Ghost);
-        Button(ID_OPENFOLDER, S(x + pad + 316, y, 154, rowH), L"Open Folder", BtnStyle::Ghost);
-        cy += pad + headH + rowH + pad + cardGap;
-
-        Card(x, cy, w, pad + headH + rowH + pad, L"ABOUT");
-        y = cy + pad + headH + 4;
-        Text(Format(L"Ulticast %hs  ·  %hs", ULTI_VERSION, ULTI_REPO), fmtSmall_,
-             S(x + pad, y, cw, rowH), kTextDim);
-        cy += pad + headH + rowH + pad + cardGap;
-
-        // Hints fill the rest of the column (no dead space).
-        Text(L"F9 saves a clip  ·  drag the webcam on the preview  ·  click a source row to configure it",
-             fmtSmall_, S(x + pad, cy + 6, cw, rowH), WithAlpha(kTextDim, 0.7f));
-        Text(L"The camera opens only while recording, streaming or replay is armed.", fmtSmall_,
-             S(x + pad, cy + 6 + 20, cw, rowH), WithAlpha(kTextDim, 0.7f));
+        Text(L"The preview runs while idle when \"Idle preview\" is on (Behavior).", fmtSmall_,
+             S(px, sy + cardH(4) + 8, pw, 18), WithAlpha(kTextDim, 0.7f));
     }
 
     DrawActivityStrip(S(20, 606, 1020, 28), 2);
@@ -3604,6 +3768,46 @@ void UiApp::OnAction(int id) {
         case ID_TAB_STREAM:
             page_ = 1;
             break;
+        case ID_SETTINGS_CAT_BASE + 0:
+        case ID_SETTINGS_CAT_BASE + 1:
+        case ID_SETTINGS_CAT_BASE + 2:
+        case ID_SETTINGS_CAT_BASE + 3:
+        case ID_SETTINGS_CAT_BASE + 4:
+        case ID_SETTINGS_CAT_BASE + 5:
+        case ID_SETTINGS_CAT_BASE + 6:
+        case ID_SETTINGS_CAT_BASE + 7:
+            settingsCat_ = id - ID_SETTINGS_CAT_BASE;
+            break;
+        case ID_MIC_PRESET_OFF:
+            settings_.micGate = false;
+            settings_.micComp = false;
+            statusText_ = L"Mic filters off";
+            statusError_ = false;
+            SyncSettingsFromUi();
+            SaveUiSettings(settings_);
+            break;
+        case ID_MIC_PRESET_VOICE:
+            settings_.micGate = true;
+            settings_.micGateDb = -50;
+            settings_.micComp = true;
+            settings_.micCompDb = -18;
+            settings_.micCompRatio = 30;
+            statusText_ = L"Voice preset — gate -50 dB, compressor -18 dB (3.0:1)";
+            statusError_ = false;
+            SyncSettingsFromUi();
+            SaveUiSettings(settings_);
+            break;
+        case ID_MIC_PRESET_BROADCAST:
+            settings_.micGate = true;
+            settings_.micGateDb = -45;
+            settings_.micComp = true;
+            settings_.micCompDb = -12;
+            settings_.micCompRatio = 45;
+            statusText_ = L"Broadcast preset — gate -45 dB, compressor -12 dB (4.5:1)";
+            statusError_ = false;
+            SyncSettingsFromUi();
+            SaveUiSettings(settings_);
+            break;
         case ID_SCENE_ADD:
             if (scenes_.size() < 6) {
                 UiScene s = scenes_[activeScene_];
@@ -3823,8 +4027,14 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (it != fieldRects_.end()) {
                     if (std::wstring* t = FieldTarget(press_)) {
                         if (edit_.text != t) EditBind(t);
-                        const float originX = it->second.left + Px(12) - edit_.scroll;
-                        EditMoveTo(EditCaretIndexFromX(originX, x), true);
+                        if (dragSelectAll_) {
+                            EditSelectAll();  // triple-click drag keeps the whole text
+                        } else {
+                            const float originX = it->second.left + Px(12) - edit_.scroll;
+                            const int idx = EditCaretIndexFromX(originX, x);
+                            if (dragWordWise_) EditExtendWordWise(idx);
+                            else EditMoveTo(idx, true);
+                        }
                         InvalidateRect(hwnd, nullptr, FALSE);
                     }
                 }
@@ -3869,7 +4079,8 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             SetCapture(hwnd_);
 
-            // text fields: focus + caret placement (double-click selects a word)
+            // text fields: focus, caret placement and native click semantics
+            // (single = caret, double = word, triple = select all, shift = extend)
             int newFocus = 0;
             for (int fid : {ID_FIELD_KEY, ID_FIELD_URL, ID_FIELD_CHROMA, ID_FIELD_BROWSER,
                             ID_SCENE_NAME, ID_FIELD_BITRATE, ID_FIELD_STREAMBITRATE,
@@ -3881,16 +4092,36 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     continue;
                 newFocus = fid;
                 if (std::wstring* t = FieldTarget(fid)) {
-                    EditBind(t);
-                    const float originX = it->second.left + Px(12) - edit_.scroll;
-                    const int idx = EditCaretIndexFromX(originX, x);
                     const uint64_t now = GetTickCount64();
-                    if (edit_.lastClickField == fid && now - edit_.lastClickMs < 400)
-                        EditSelectWordAt(idx);  // double click
-                    else
-                        EditMoveTo(idx, false);
+                    const bool sameSpot = std::abs((int)x - lastClickPt_.x) <= 4 &&
+                                          std::abs((int)y - lastClickPt_.y) <= 4;
+                    if (edit_.text != t) {
+                        EditBind(t);  // a new field always starts fresh
+                        clickCount_ = 1;
+                    } else if (edit_.lastClickField == fid && now - edit_.lastClickMs < 500 &&
+                               sameSpot) {
+                        clickCount_ = clickCount_ >= 3 ? 1 : clickCount_ + 1;
+                    } else {
+                        clickCount_ = 1;
+                    }
                     edit_.lastClickField = fid;
                     edit_.lastClickMs = now;
+                    lastClickPt_ = POINT{(LONG)x, (LONG)y};
+                    const float originX = it->second.left + Px(12) - edit_.scroll;
+                    const int idx = EditCaretIndexFromX(originX, x);
+                    dragWordWise_ = false;
+                    dragSelectAll_ = false;
+                    if (GetKeyState(VK_SHIFT) & 0x8000) {
+                        EditMoveTo(idx, true);  // shift+click extends the selection
+                    } else if (clickCount_ == 2) {
+                        EditSelectWordAt(idx);
+                        dragWordWise_ = true;
+                    } else if (clickCount_ >= 3) {
+                        EditSelectAll();
+                        dragSelectAll_ = true;
+                    } else {
+                        EditMoveTo(idx, false);
+                    }
                 }
             }
             if (newFocus != focus_) {
@@ -4085,9 +4316,33 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 DestroyWindow(hwnd);
             } else {
                 ShowWindow(hwnd, SW_HIDE);
+                // Say so once per session: silently staying alive is what makes
+                // "close" feel broken.
+                if (!trayBalloonShown_) {
+                    trayBalloonShown_ = true;
+                    nid_.uFlags |= NIF_INFO;
+                    wcscpy_s(nid_.szInfoTitle, L"Ulticast is still running");
+                    wcscpy_s(nid_.szInfo,
+                             stats_.recording || stats_.streaming
+                                 ? L"Recording/streaming continues in the background. "
+                                   L"Right-click the tray icon and choose Exit to quit."
+                                 : L"Right-click the tray icon and choose Exit to quit, or turn "
+                                   L"off \"Close to tray\" in Settings.");
+                    nid_.dwInfoFlags = NIIF_INFO;
+                    Shell_NotifyIconW(NIM_MODIFY, &nid_);
+                    nid_.uFlags &= ~NIF_INFO;
+                }
             }
             return 0;
         case WM_DESTROY:
+            // Remove the tray icon while the window still exists: the shell
+            // looks the icon up by (hWnd, uID), so a delete after the window is
+            // gone leaves a ghost icon sitting in the notification area.
+            if (nid_.cbSize) {
+                Shell_NotifyIconW(NIM_DELETE, &nid_);
+                nid_.cbSize = 0;
+                Diag::Log("[tray] icon removed");
+            }
             PostQuitMessage(0);
             return 0;
     }
@@ -4103,5 +4358,6 @@ int RunUiApp(HINSTANCE instance) {
     // Stop the session (and close its browser) before shutting CEF down.
     app.Shutdown();
     BrowserOverlay::ShutdownGlobal();
+    Diag::Log("[exit] done");
     return rc;
 }

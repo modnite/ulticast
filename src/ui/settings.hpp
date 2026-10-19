@@ -15,6 +15,7 @@ struct UiSourceSetting {
     float camX = -1, camY = -1;  // Video: free PiP position
     // Orientation: bit0 = flip H, bit1 = flip V, bits 2-3 = quarter turns.
     int flags = 0;
+    float wFrac = -1, hFrac = -1;  // free size (0..1 of canvas); -1 = default
 };
 
 // One scene: a named source layout the user can switch between.

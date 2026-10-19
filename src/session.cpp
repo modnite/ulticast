@@ -987,8 +987,18 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
         layers[layerCount - 1].flipY = s.flipV;
         layers[layerCount - 1].rotate = s.rotate & 3;
     };
-    for (const auto& s : sources) {
+    {
+        std::lock_guard<std::mutex> lk(layerRectMu_);
+        layerRects_.clear();
+    }
+    for (size_t si = 0; si < sources.size(); ++si) {
+        const auto& s = sources[si];
         if (!s.enabled || layerCount >= 8) continue;
+        // Record where this layer lands so the UI can select and drag it.
+        auto recordRect = [&](float lx, float ly, float lw, float lh) {
+            std::lock_guard<std::mutex> lk(layerRectMu_);
+            layerRects_.push_back({(int)si, lx, ly, lw, lh});
+        };
 
         if (s.type == SessionSourceType::Capture || s.type == SessionSourceType::Window) {
             const int ci = captureIdx++;
@@ -1016,6 +1026,7 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
                     h = (float)s.h;
                 }
                 pushLayer(base, x, y, w, h);
+                recordRect(x, y, w, h);
                 applyXform(s);
                 // CLI path: the primary capture's orientation can come from the
                 // config (--flip-h / --flip-v / --rotate).
@@ -1052,7 +1063,13 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
                 }
                 if (e->srv && e->w > 0) {
                     float x, y, w, h;
-                    if (s.w > 0) {
+                    if (s.xr >= 0.f && s.yr >= 0.f) {
+                        // Free position dragged on the UI preview.
+                        w = canvasW / 3.0f;
+                        h = w * (float)e->h / (float)e->w;
+                        x = s.xr * canvasW;
+                        y = s.yr * canvasH;
+                    } else if (s.w > 0) {
                         x = (float)s.x;
                         y = (float)s.y;
                         w = (float)s.w;
@@ -1066,7 +1083,12 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
                         x = left ? margin : canvasW - w - margin;
                         y = top ? margin : canvasH - h - margin;
                     }
+                    if (s.wr > 0.f) {
+                        w = s.wr * canvasW;
+                        h = (s.hr > 0.f ? s.hr : s.wr) * canvasH;
+                    }
                     pushLayer(e->srv.Get(), x, y, w, h);
+                    recordRect(x, y, w, h);
                     applyXform(s);
                 }
             }
@@ -1136,7 +1158,13 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
                     x = left ? margin : canvasW - w - margin;
                     y = top ? margin : canvasH - h - margin;
                 }
+                // Free size from the UI (drag-to-resize): fractional of the canvas.
+                if (s.wr > 0.f) {
+                    w = s.wr * canvasW;
+                    h = (s.hr > 0.f ? s.hr : s.wr) * canvasH;
+                }
                 pushLayer(v->srv.Get(), x, y, w, h);
+                recordRect(x, y, w, h);
                 applyXform(s);
                 if (cfg_.chroma && cfg_.chromaLayer == 0) applyKey(layers[layerCount - 1]);
             }
@@ -1184,9 +1212,19 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
                 }
             }
             if (browserSrv_ && browserW_ > 0) {
-                const float w = (float)(s.w > 0 ? s.w : (int)canvasW);
-                const float h = (float)(s.h > 0 ? s.h : (int)canvasH);
-                pushLayer(browserSrv_.Get(), (float)s.x, (float)s.y, w, h);
+                float x = (float)s.x, y = (float)s.y;
+                float w = (float)(s.w > 0 ? s.w : (int)canvasW);
+                float h = (float)(s.h > 0 ? s.h : (int)canvasH);
+                if (s.xr >= 0.f && s.yr >= 0.f) {
+                    x = s.xr * canvasW;
+                    y = s.yr * canvasH;
+                }
+                if (s.wr > 0.f) {
+                    w = s.wr * canvasW;
+                    h = (s.hr > 0.f ? s.hr : s.wr) * canvasH;
+                }
+                pushLayer(browserSrv_.Get(), x, y, w, h);
+                recordRect(x, y, w, h);
                 applyXform(s);
                 layers[layerCount - 1].useAlpha = true;
                 layers[layerCount - 1].premultiplied = true;  // CEF OSR paints premultiplied BGRA

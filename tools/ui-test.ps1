@@ -102,6 +102,25 @@ function Click($hwnd, [double]$x, [double]$y) {
     Start-Sleep -Milliseconds 320
     Wait-Idle
 }
+function Drag($hwnd, [double]$x1, [double]$y1, [double]$x2, [double]$y2) {
+    Refresh-Geometry
+    $a = D2C $x1 $y1
+    $b = D2C $x2 $y2
+    $lp = [IntPtr](($a.y -shl 16) -bor ($a.x -band 0xFFFF))
+    [UlticastUiTest]::PostMessage($hwnd, 0x201, [IntPtr]1, $lp) | Out-Null
+    Start-Sleep -Milliseconds 80
+    for ($i = 1; $i -le 6; $i++) {
+        $mx = [int]($a.x + ($b.x - $a.x) * $i / 6)
+        $my = [int]($a.y + ($b.y - $a.y) * $i / 6)
+        $lp2 = [IntPtr](($my -shl 16) -bor ($mx -band 0xFFFF))
+        [UlticastUiTest]::PostMessage($hwnd, 0x200, [IntPtr]0, $lp2) | Out-Null
+        Start-Sleep -Milliseconds 40
+    }
+    $lp3 = [IntPtr](($b.y -shl 16) -bor ($b.x -band 0xFFFF))
+    [UlticastUiTest]::PostMessage($hwnd, 0x202, [IntPtr]0, $lp3) | Out-Null
+    Start-Sleep -Milliseconds 200
+    Wait-Idle
+}
 function Shot($hwnd, [string]$name) {
     $wr = New-Object UlticastUiTest+RECT
     [UlticastUiTest]::GetWindowRect($hwnd, [ref]$wr) | Out-Null
@@ -427,6 +446,56 @@ $clip = Get-Clipboard -Raw
 $clipOk = ($clip -ne $null) -and $clip.Contains('Ulticast') -and $clip.Contains('log tail')
 Check 'copy log: the log tail lands on the clipboard' $clipOk `
       $(if ($clip) { "clipboard=" + $clip.Substring(0, [Math]::Min(60, $clip.Length)) } else { 'empty clipboard' })
+
+# ------------------------------------------------------- preview layers -----
+# A source can be selected and dragged directly on the preview (the overlay
+# source is the topmost layer and starts full-canvas).
+function SceneField([string]$key, [int]$srcType, [int]$field) {
+    $v = SettingValue $key
+    if (-not $v) { return $null }
+    foreach ($src in $v.Split(';')) {
+        $f = $src.Split(':')
+        if ($f.Count -gt $field -and $f[0] -eq "$srcType") { return $f[$field] }
+    }
+    return $null
+}
+Click $hwnd 284 27            # Record page
+Click $hwnd 680 200           # click a layer on the preview
+Drag $hwnd 680 200 560 160    # drag it up-left
+$movedLayer = $false
+$freeBefore = $true
+foreach ($src in (SettingValue 'scene0').Split(';')) {
+    $f = $src.Split(':')
+    if ($f.Count -gt 8 -and $f[0] -ne '0') {
+        if ([double]$f[7] -ge 0) { $movedLayer = $true }
+    }
+}
+Check 'preview: dragging a layer moves it' $movedLayer 'no layer picked up a free position'
+Shot $hwnd '22-layer-selected' | Out-Null
+
+# ------------------------------------------------------------- pop-out ------
+# The preview detaches into its own resizable window and closes cleanly.
+Add-Type -MemberDefinition '[DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr FindWindow(string cls, string win);' -Name PopOut -Namespace UlticastUi
+Click $hwnd 372 87            # pop-out button (next to the fullscreen button)
+Start-Sleep -Milliseconds 1500
+$pop = [UlticastUi.PopOut]::FindWindow("UlticastPreviewWindow", $null)
+Check 'pop-out preview: opens its own window' ($pop -ne [IntPtr]::Zero) 'no preview window'
+if ($pop -ne [IntPtr]::Zero) {
+    $wr = New-Object UlticastUiTest+RECT
+    [UlticastUiTest]::GetWindowRect($pop, [ref]$wr) | Out-Null
+    $bmp = New-Object System.Drawing.Bitmap(($wr.Right - $wr.Left), ($wr.Bottom - $wr.Top))
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $hdc = $g.GetHdc()
+    [UlticastUiTest]::PrintWindow($pop, $hdc, 2) | Out-Null
+    $g.ReleaseHdc($hdc)
+    $g.Dispose()
+    $bmp.Save((Join-Path $Out '23-popout.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+    $bmp.Dispose()
+    [UlticastUiTest]::PostMessage($pop, 0x0010, [IntPtr]0, [IntPtr]0) | Out-Null
+    Start-Sleep -Milliseconds 900
+    $pop2 = [UlticastUi.PopOut]::FindWindow("UlticastPreviewWindow", $null)
+    Check 'pop-out preview: closes cleanly' ($pop2 -eq [IntPtr]::Zero) 'window still open'
+}
 
 # ------------------------------------------------------------ fullscreen ----
 # F11 fills the screen with the preview; Esc restores the window.

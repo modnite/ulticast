@@ -118,6 +118,10 @@ static void RgbToHsl(uint32_t rgb, float* h, float* s, float* l) {
     *h /= 6.f;
 }
 
+// One style for every hint line (the dim text colour got quieter, so the alpha
+// went up to keep hints readable).
+static constexpr float kHintAlpha = 0.8f;
+
 // Fills the palette from an accent + light/dark. Called at startup and whenever
 // the user picks a theme in Settings > Appearance.
 static void ApplyTheme(int accentIndex, bool light) {
@@ -125,21 +129,22 @@ static void ApplyTheme(int accentIndex, bool light) {
     float h = 0.78f, s = 0.8f, l = 0.6f;
     RgbToHsl(kAccents[ai].rgb, &h, &s, &l);
     if (light) {
-        kBg = Hsl(h, 0.20f, 0.97f);
-        kPanel = Hsl(h, 0.22f, 0.935f);
-        kPanel2 = Hsl(h, 0.26f, 0.90f);
-        kBorder = Hsl(h, 0.24f, 0.80f);
+        kBg = Hsl(h, 0.20f, 0.975f);
+        kPanel = Hsl(h, 0.20f, 0.955f);
+        kPanel2 = Hsl(h, 0.24f, 0.915f);
+        kBorder = Hsl(h, 0.22f, 0.87f);
         kText = Hsl(h, 0.35f, 0.14f);
-        kTextDim = Hsl(h, 0.16f, 0.44f);
+        kTextDim = Hsl(h, 0.16f, 0.47f);
         kHover = D2D1::ColorF(0.f, 0.f, 0.f, 0.05f);
         kHoverDown = D2D1::ColorF(0.f, 0.f, 0.f, 0.10f);
     } else {
-        kBg = Hsl(h, 0.30f, 0.075f);
-        kPanel = Hsl(h, 0.28f, 0.115f);
-        kPanel2 = Hsl(h, 0.30f, 0.165f);
-        kBorder = Hsl(h, 0.28f, 0.27f);
+        kBg = Hsl(h, 0.28f, 0.072f);
+        kPanel = Hsl(h, 0.26f, 0.105f);
+        kPanel2 = Hsl(h, 0.28f, 0.145f);
+        // Quieter borders: the old value made every control a visible rectangle.
+        kBorder = Hsl(h, 0.26f, 0.185f);
         kText = Hsl(h, 0.22f, 0.93f);
-        kTextDim = Hsl(h, 0.15f, 0.62f);
+        kTextDim = Hsl(h, 0.15f, 0.55f);
         kHover = D2D1::ColorF(1.f, 1.f, 1.f, 0.06f);
         kHoverDown = D2D1::ColorF(0.f, 0.f, 0.f, 0.16f);
     }
@@ -220,10 +225,12 @@ enum {
     ID_REPORT,
     ID_COPYLOG,
     ID_PREVIEW_FULL,
+    ID_PREVIEW_POP,
     ID_BROWSE,
     ID_ITEM_BASE = 1000,
     ID_SCENE_BASE = 2000,
     ID_PREVIEW_WEBCAM = 3000,
+    ID_PREVIEW_AREA,
     ID_ADD_SOURCE = 4000,
     ID_SRC_PROP_BASE = 4001,    // + source index: row click opens properties
     ID_SRC_TOGGLE_BASE = 4100,  // + source index: enable/disable
@@ -501,6 +508,14 @@ private:
     void UpdateUiTick();   // keep the preview in step with the capture rate
     void ApplyPendingUrlEdit();  // debounced overlay URL reload (runs from Paint)
     void TogglePreviewFullscreen(bool on);
+    // Pop-out preview: a second, resizable top-level window showing the scene
+    // preview on its own swapchain (same device, zero-copy shared texture).
+    static LRESULT CALLBACK PopOutProc(HWND, UINT, WPARAM, LPARAM);
+    void TogglePopOutPreview(bool on);
+    void TogglePopOutFullscreen(bool on);
+    void PaintPopOut();
+    void ResizePopOut(UINT w, UINT h);
+    void EnsurePopOutTarget();
     void OnTrayCommand(int id);
     void InitTray();
     void ShowTrayMenu();
@@ -563,6 +578,13 @@ private:
     LONG savedStyle_ = 0;
     RECT savedRect_{};
     bool savedMaximized_ = false;
+    // Pop-out preview window state.
+    HWND popHwnd_ = nullptr;
+    ComPtr<IDXGISwapChain1> popSwap_;
+    ComPtr<ID2D1Bitmap1> popTarget_;
+    bool popFullscreen_ = false;
+    RECT popSavedRect_{};
+    LONG popSavedStyle_ = 0;
     std::map<int, D2D1_RECT_F> comboRects_, sliderRects_, fieldRects_;
     std::map<int, std::pair<int, int>> sliderRange_;  // id -> (min, max)
     std::map<int, int*> sliderValue_;                 // id -> bound value
@@ -632,6 +654,7 @@ private:
         bool dxgi = false;       // Capture: DXGI duplication instead of WGC
         int corner = 3;          // Video: PiP corner preset
         float camX = -1, camY = -1;  // Video: free PiP position (0..1 of canvas)
+        float wFrac = -1, hFrac = -1;  // free size (0..1 of canvas); -1 = default
         bool flipH = false, flipV = false;  // orientation
         int rotate = 0;          // 0..3 quarter turns
     };
@@ -660,6 +683,7 @@ private:
     std::wstring SourceTag(const UiSource& s) const;
     bool IsSecondaryCapture(int sourceIndex) const;
     bool IsCaptureLayer(const UiSource& s) const;
+    bool IsPrimaryCapture(int index) const;  // the first enabled capture drives the base frame
     void EnsureSceneDefaults(UiScene& scene) const;
     std::vector<SessionSource> SceneSources(const UiScene& sc) const;
     void DrawActionPopup();
@@ -708,6 +732,15 @@ private:
     // webcam drag on the preview
     bool draggingWebcam_ = false;
     float dragOffX_ = 0, dragOffY_ = 0;
+    // Preview layer interaction: select, drag to move, drag a handle to resize.
+    int selectedSource_ = -1;
+    int dragLayer_ = -1;
+    bool dragResize_ = false;
+    D2D1_RECT_F LayerDeviceRect(const Session::LayerRect& lr, const D2D1_RECT_F& pr) const;
+    void PreviewDeviceToCanvas(const D2D1_RECT_F& pr, float dx, float dy, float* cx,
+                               float* cy) const;
+    int LayerAtDevicePoint(const D2D1_RECT_F& pr, float dx, float dy) const;
+    void DrawLayerOverlay(const D2D1_RECT_F& pr);
 
     // popup scrolling (long lists, e.g. the window picker)
     int popupScroll_ = 0;
@@ -1470,7 +1503,7 @@ void UiApp::Field(int id, const D2D1_RECT_F& r, std::wstring* text, bool passwor
 
     dc_->PushAxisAlignedClip(r, D2D1_ANTIALIAS_MODE_ALIASED);
     if (shown.empty() && !focused) {
-        Text(placeholder, fmtBody_, Inset(r, 12, 0), WithAlpha(kTextDim, 0.8f));
+        Text(placeholder, fmtBody_, Inset(r, 12, 0), WithAlpha(kTextDim, kHintAlpha));
     } else {
         // selection highlight behind the text
         if (focused && edit_.anchor != edit_.caret) {
@@ -1568,6 +1601,7 @@ void UiApp::Paint() {
         textScale_ = scale_;
     }
 
+    dc_->SetTarget(target_.Get());  // the pop-out preview shares this context
     dc_->BeginDraw();
     const auto paintT0 = std::chrono::steady_clock::now();
     dc_->SetTransform(D2D1::Matrix3x2F::Identity());
@@ -1587,7 +1621,7 @@ void UiApp::Paint() {
         DrawPreview(full);
         DrawPreviewStats(full);
         Text(L"F11 or Esc exits fullscreen", fmtSmall_, S(20, kWinH - 30, 400, 20),
-             WithAlpha(kTextDim, 0.7f));
+             WithAlpha(kTextDim, kHintAlpha));
     } else {
         DrawHeader();
         if (page_ == 2)
@@ -1631,6 +1665,7 @@ void UiApp::Paint() {
         const double left = 1000.0 / (double)fps - paintMs_;
         if (left > 1.0) Sleep((DWORD)(left - 0.5));
         InvalidateRect(hwnd_, nullptr, FALSE);
+        if (popHwnd_) InvalidateRect(popHwnd_, nullptr, FALSE);  // keep both in step
     } else if (fastTimer_) {
         timeEndPeriod(1);
         fastTimer_ = false;
@@ -1761,7 +1796,7 @@ void UiApp::DrawPreview(const D2D1_RECT_F& r) {
         Text(L"NO SIGNAL", fmtSection_, c1, kTextDim, DWRITE_TEXT_ALIGNMENT_CENTER);
         Text(settings_.idlePreview ? L"Starting preview…"
                                    : L"Idle preview is off — see Setup > Idle preview",
-             fmtSmall_, c2, WithAlpha(kTextDim, 0.7f), DWRITE_TEXT_ALIGNMENT_CENTER);
+             fmtSmall_, c2, WithAlpha(kTextDim, kHintAlpha), DWRITE_TEXT_ALIGNMENT_CENTER);
     }
 
     if (sessionRunning_ && stats_.width) {
@@ -1780,6 +1815,12 @@ void UiApp::DrawPreview(const D2D1_RECT_F& r) {
                                           pill.bottom),
              kText);
     }
+
+    // Preview interaction: the whole preview is one hit area (registered before
+    // the corner buttons so they stay clickable); which layer is under the cursor
+    // decides select / move / resize.
+    hits_.push_back({ID_PREVIEW_AREA, r, true});
+    DrawLayerOverlay(r);
 
     // Fullscreen toggle: four corner brackets, top-left (the stats pill is top-right).
     D2D1_RECT_F fs = D2D1::RectF(r.left + Px(10), r.top + Px(10), r.left + Px(36), r.top + Px(36));
@@ -1813,6 +1854,23 @@ void UiApp::DrawPreview(const D2D1_RECT_F& r) {
                       D2D1::Point2F(fs.right - m, fs.bottom - m - len), Br(gc), Px(1.6f));
     }
 
+    // Pop-out button: detaches the preview into its own resizable window.
+    D2D1_RECT_F po =
+        D2D1::RectF(fs.right + Px(6), fs.top, fs.right + Px(6) + Px(26), fs.bottom);
+    hits_.push_back({ID_PREVIEW_POP, po, true});
+    const bool poHover = hover_ == ID_PREVIEW_POP;
+    dc_->FillRoundedRectangle(D2D1::RoundedRect(po, Px(6), Px(6)),
+                              Br(WithAlpha(kBlack, poHover ? 0.6f : 0.35f)));
+    dc_->DrawRoundedRectangle(D2D1::RoundedRect(po, Px(6), Px(6)),
+                              Br(WithAlpha(kWhite, poHover ? 0.25f : 0.12f)), Px(1));
+    {
+        const float gx = po.left + Px(7), gy = po.top + Px(8);
+        const float gw = Px(12), gh = Px(10);
+        dc_->DrawRectangle(D2D1::RectF(gx, gy, gx + gw, gy + gh), Br(WithAlpha(kWhite, 0.85f)),
+                           Px(1.4f));
+        dc_->FillRectangle(D2D1::RectF(gx, gy, gx + gw, gy + Px(3)), Br(WithAlpha(kWhite, 0.85f)));
+    }
+
     if (sessionRunning_ && !stats_.paused) {
         if (previewSession_) {
             dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(r.left + Px(20), r.top + Px(20)), Px(6),
@@ -1827,25 +1885,6 @@ void UiApp::DrawPreview(const D2D1_RECT_F& r) {
         }
     }
 
-    // Draggable webcam PiP (only while a real session has the camera up).
-    if (!previewSession_ && sessionRunning_ && FirstVideoSourceIndex() >= 0 &&
-        !stats_.webcamName.empty()) {
-        D2D1_RECT_F wr = PreviewWebcamRect(r);
-        if (wr.right > wr.left && wr.bottom > wr.top) {
-            hits_.push_back({ID_PREVIEW_WEBCAM, wr, true});
-            if (draggingWebcam_ || hover_ == ID_PREVIEW_WEBCAM) {
-                dc_->DrawRoundedRectangle(D2D1::RoundedRect(wr, Px(4), Px(4)),
-                                          Br(WithAlpha(kAccent, 0.9f)), Px(2));
-                std::wstring hint = L"Drag to move";
-                float tw = MeasureText(hint, fmtSmall_.Get()) + Px(18);
-                D2D1_RECT_F tr =
-                    D2D1::RectF(wr.left, wr.bottom + Px(6), wr.left + tw, wr.bottom + Px(26));
-                dc_->FillRoundedRectangle(D2D1::RoundedRect(tr, Px(6), Px(6)),
-                                          Br(WithAlpha(kBlack, 0.65f)));
-                Text(hint, fmtSmall_, tr, kText, DWRITE_TEXT_ALIGNMENT_CENTER);
-            }
-        }
-    }
 }
 
 void UiApp::DrawModePage(bool recordMode) {
@@ -1868,11 +1907,11 @@ void UiApp::DrawSceneRail() {
     SectionLabel(L"SCENES", x, 64);
 
     const int n = (int)scenes_.size();
-    Panel(S(x, 82, w, n * 36 + 4), 10, WithAlpha(kPanel, 0.35f), false);
+    Panel(S(x, 82, w, n * 34 + 4), 10, WithAlpha(kPanel, 0.35f), false);
     float y = 86;
     for (int i = 0; i < n && i < 6; ++i) {
         const int id = ID_SCENE_BASE + i;
-        D2D1_RECT_F row = S(x, y, w, 32);
+        D2D1_RECT_F row = S(x, y, w, 30);
         hits_.push_back({id, row, true});
         const bool active = i == activeScene_;
         auto rr = D2D1::RoundedRect(row, Px(8), Px(8));
@@ -1886,11 +1925,11 @@ void UiApp::DrawSceneRail() {
         dc_->PushAxisAlignedClip(row, D2D1_ANTIALIAS_MODE_ALIASED);
         Text(scenes_[i].name, fmtBody_, Inset(row, 12, 0), active ? kText : kTextDim);
         dc_->PopAxisAlignedClip();
-        y += 36;
+        y += 34;
     }
 
     // name + add/remove
-    y = 86 + n * 36 + 8;
+    y = 86 + n * 34 + 8;
     Text(L"Name", fmtSmall_, S(x, y, 44, 34), WithAlpha(kTextDim, 0.85f));
     Field(ID_SCENE_NAME, S(x + 46, y, 134, 34), &sceneName_, false, L"Scene name");
     Button(ID_SCENE_ADD, S(x + 188, y, 44, 34), L"+", BtnStyle::Ghost, scenes_.size() < 6);
@@ -1908,7 +1947,7 @@ void UiApp::DrawSceneRail() {
     sourceRowRects_.assign(sc.sources.size(), D2D1_RECT_F{});
     for (size_t i = 0; i < sc.sources.size(); ++i) {
         if (y > 484) break;  // leave room for the cursor row + activity card
-        D2D1_RECT_F row = S(x, y, w, 32);
+        D2D1_RECT_F row = S(x, y, w, 30);
         sourceRowRects_[i] = row;
         const int propId = ID_SRC_PROP_BASE + (int)i;
         hits_.push_back({propId, row, true});
@@ -1937,30 +1976,52 @@ void UiApp::DrawSceneRail() {
         Text(L"\x25BC", fmtSmall_, dnR, canDown ? kTextDim : WithAlpha(kTextDim, 0.25f),
              DWRITE_TEXT_ALIGNMENT_CENTER);
 
-        Toggle(ID_SRC_TOGGLE_BASE + (int)i, S(x + w - 54, y, 50, 32), L"",
+        Toggle(ID_SRC_TOGGLE_BASE + (int)i, S(x + w - 54, y, 50, 30), L"",
                &scenes_[activeScene_].sources[i].enabled, true, /*pinRight=*/true);
-        y += 36;
+        y += 34;
     }
 
     // cursor is a scene-level source-like switch
     if (y <= 520) {
-        Toggle(ID_SRC_CURSOR, S(x, y, w, 32), L"Show Cursor", &scenes_[activeScene_].cursor);
-        y += 36;
+        Toggle(ID_SRC_CURSOR, S(x, y, w, 30), L"Show Cursor", &scenes_[activeScene_].cursor);
+        y += 34;
     }
 
-    // ACTIVITY fills the rail, but only up to a sane height: an oversized empty
-    // box reads worse than a little breathing room.
-    const float actTop = y + 8;
-    const float actMaxH = 170;
-    if (actTop < 624 - 70) {
-        const float h = (std::min)(624 - actTop, actMaxH);
-        Card(x, actTop, w, h, L"ACTIVITY");
-        int lines = (int)((h - 36) / 14);
-        if (lines < 1) lines = 1;
-        DrawActivityStrip(S(x + 10, actTop + 30, w - 20, (float)lines * 14), lines);
-        if (624 - (actTop + h) > 46)
-            Text(L"F9 saves a clip while the replay buffer is armed.", fmtSmall_,
-                 S(x, actTop + h + 8, w, 18), WithAlpha(kTextDim, 0.7f));
+    // Live status fills the rail's leftover space with something useful, and the
+    // activity log sits under it as a compact strip (no tall empty card).
+    {
+        const float stTop = y + 8;
+        const float stH = 4 * 26 + 30;
+        if (stTop + stH + 96 < 624) {
+            Card(x, stTop, w, stH, L"STATUS");
+            float sy = stTop + 26;
+            auto row = [&](const std::wstring& label, const std::wstring& value,
+                           const D2D1_COLOR_F& valueColor) {
+                Text(label, fmtSmall_, S(x + 12, sy, 96, 24), WithAlpha(kTextDim, kHintAlpha));
+                Text(value, fmtSmall_, S(x + 108, sy, w - 120, 24), valueColor);
+                sy += 26;
+            };
+            row(L"Recording",
+                stats_.recording ? FormatTime(stats_.recSeconds) : L"idle",
+                stats_.recording ? kRec : WithAlpha(kTextDim, kHintAlpha));
+            row(L"Streaming", stats_.streaming ? FormatTime(stats_.strSeconds) : L"idle",
+                stats_.streaming ? kAccent : WithAlpha(kTextDim, kHintAlpha));
+            row(L"Replay", stats_.replayArmed ? Format(L"%d s", settings_.replaySeconds) : L"off",
+                stats_.replayArmed ? kText : WithAlpha(kTextDim, kHintAlpha));
+            row(L"Capture",
+                sessionRunning_ && stats_.width
+                    ? Format(L"%ux%u  %s", stats_.width, stats_.height,
+                             Widen(stats_.backend).c_str())
+                    : L"not running",
+                sessionRunning_ ? WithAlpha(kText, 0.85f) : WithAlpha(kTextDim, kHintAlpha));
+        }
+        const float actTop = stTop + stH + 8;
+        const float actH = (std::min)(624 - actTop, 132.f);
+        if (actH > 60) {
+            Card(x, actTop, w, actH, L"ACTIVITY");
+            const int lines = (std::max)(1, (int)((actH - 32) / 14));
+            DrawActivityStrip(S(x + 10, actTop + 26, w - 20, (float)lines * 14), lines);
+        }
     }
 }
 
@@ -2002,6 +2063,17 @@ bool UiApp::IsCaptureLayer(const UiSource& s) const {
     return s.type == SessionSourceType::Capture || s.type == SessionSourceType::Window;
 }
 
+bool UiApp::IsPrimaryCapture(int index) const {
+    if (scenes_.empty()) return false;
+    const UiScene& sc = scenes_[activeScene_];
+    for (int i = 0; i < (int)sc.sources.size(); ++i) {
+        if (!sc.sources[i].enabled) continue;
+        if (!IsCaptureLayer(sc.sources[i])) continue;
+        return i == index;  // the first enabled capture is the base layer
+    }
+    return false;
+}
+
 bool UiApp::IsSecondaryCapture(int sourceIndex) const {
     if (scenes_.empty()) return false;
     const UiScene& sc = scenes_[activeScene_];
@@ -2040,6 +2112,7 @@ void UiApp::BuildSourceProperties(int sourceIndex) {
             add(11, s.flipH ? L"Flip horizontal: on" : L"Flip horizontal: off");
             add(12, s.flipV ? L"Flip vertical: on" : L"Flip vertical: off");
             add(13, Format(L"Rotate 90°  (now %d°)", (s.rotate & 3) * 90));
+            if (s.camX >= 0.f || s.wFrac > 0.f) add(14, L"Reset position and size");
             if (IsSecondaryCapture(sourceIndex)) {
                 for (int c = 0; c < 4; ++c) {
                     std::wstring label = L"Position: " + positions_[c];
@@ -2160,6 +2233,12 @@ void UiApp::ApplySourceProperty(int sourceIndex, int itemIndex) {
             break;
         case 13:  // rotate a quarter turn
             s.rotate = (s.rotate + 1) & 3;
+            captureChanged = true;
+            break;
+        case 14:  // reset the free position and size
+            s.camX = s.camY = -1.f;
+            s.wFrac = s.hFrac = -1.f;
+            s.corner = 3;
             captureChanged = true;
             break;
     }
@@ -2539,11 +2618,73 @@ void UiApp::DrawActionPopup() {
     DrawPopup();
 }
 
+D2D1_RECT_F UiApp::LayerDeviceRect(const Session::LayerRect& lr,
+                                  const D2D1_RECT_F& pr) const {
+    return PreviewCanvasToDevice(pr, lr.x, lr.y, lr.w, lr.h);
+}
+
+void UiApp::PreviewDeviceToCanvas(const D2D1_RECT_F& pr, float dx, float dy, float* cx,
+                                  float* cy) const {
+    *cx = 0;
+    *cy = 0;
+    if (previewW_ == 0 || previewH_ == 0) return;
+    const float sc = (std::min)((pr.right - pr.left) / (float)previewW_,
+                                (pr.bottom - pr.top) / (float)previewH_);
+    const float ox = (pr.left + pr.right) / 2 - previewW_ * sc / 2;
+    const float oy = (pr.top + pr.bottom) / 2 - previewH_ * sc / 2;
+    *cx = (dx - ox) / sc;
+    *cy = (dy - oy) / sc;
+}
+
+int UiApp::LayerAtDevicePoint(const D2D1_RECT_F& pr, float dx, float dy) const {
+    // Topmost first; the primary capture is the base layer and is not draggable.
+    auto rects = session_.LayerRects();
+    for (auto it = rects.rbegin(); it != rects.rend(); ++it) {
+        if (scenes_.empty()) break;
+        const int i = it->index;
+        if (i < 0 || i >= (int)scenes_[activeScene_].sources.size()) continue;
+        if (IsPrimaryCapture(i)) continue;
+        const D2D1_RECT_F r = LayerDeviceRect(*it, pr);
+        if (r.right > r.left && dx >= r.left && dx < r.right && dy >= r.top && dy < r.bottom)
+            return i;
+    }
+    return -1;
+}
+
+void UiApp::DrawLayerOverlay(const D2D1_RECT_F& pr) {
+    if (scenes_.empty()) return;
+    auto rects = session_.LayerRects();
+    if (rects.empty()) return;
+    const float hs = Px(5);
+    for (const auto& lr : rects) {
+        const int i = lr.index;
+        if (i < 0 || i >= (int)scenes_[activeScene_].sources.size()) continue;
+        if (IsPrimaryCapture(i)) continue;
+        const D2D1_RECT_F r = LayerDeviceRect(lr, pr);
+        if (r.right <= r.left) continue;
+        const bool sel = i == selectedSource_;
+        const bool hov = hover_ == ID_PREVIEW_AREA && !sel && LayerAtDevicePoint(pr, 0, 0) == i;
+        if (!sel && !hov) continue;
+        dc_->DrawRectangle(D2D1::RectF(r.left, r.top, r.right, r.bottom),
+                           Br(WithAlpha(kAccent, sel ? 0.95f : 0.45f)), sel ? Px(2) : Px(1));
+        if (!sel) continue;
+        const D2D1_POINT_2F corners[4] = {
+            D2D1::Point2F(r.left, r.top), D2D1::Point2F(r.right, r.top),
+            D2D1::Point2F(r.left, r.bottom), D2D1::Point2F(r.right, r.bottom)};
+        for (const auto& c : corners) {
+            dc_->FillRectangle(D2D1::RectF(c.x - hs, c.y - hs, c.x + hs, c.y + hs),
+                               Br(kAccent));
+            dc_->DrawRectangle(D2D1::RectF(c.x - hs, c.y - hs, c.x + hs, c.y + hs),
+                               Br(WithAlpha(kBlack, 0.5f)), Px(1));
+        }
+    }
+}
+
 void UiApp::DrawPreviewStats(const D2D1_RECT_F& r) {
-    const float stripH = Px(54);
+    const float stripH = Px(50);
     D2D1_RECT_F strip =
         D2D1::RectF(r.left + Px(1), r.bottom - stripH, r.right - Px(1), r.bottom - Px(1));
-    dc_->FillRectangle(strip, Br(WithAlpha(kBlack, 0.5f)));
+    dc_->FillRectangle(strip, Br(WithAlpha(kBlack, 0.42f)));
 
     // Timer = the current output's runtime, not the app session age (the idle
     // preview is a session too and must not tick a recording timer).
@@ -2551,8 +2692,8 @@ void UiApp::DrawPreviewStats(const D2D1_RECT_F& r) {
     const double timerSeconds = stats_.recording ? stats_.recSeconds : stats_.strSeconds;
     Text(timing ? FormatTime(timerSeconds)
                 : (previewSession_ ? L"PREVIEW" : L"00:00"),
-         fmtMono_, D2D1::RectF(strip.left + Px(18), strip.top + Px(4), strip.left + Px(170),
-                               strip.top + Px(34)),
+         fmtMono_, D2D1::RectF(strip.left + Px(18), strip.top + Px(2), strip.left + Px(170),
+                               strip.top + Px(30)),
          kText);
 
     double fps = (sessionRunning_ && stats_.elapsed > 0.1) ? stats_.captured / stats_.elapsed : 0.0;
@@ -2568,13 +2709,13 @@ void UiApp::DrawPreviewStats(const D2D1_RECT_F& r) {
     line += Format(L"   ·   %llu dropped",
                    (unsigned long long)(sessionRunning_ ? stats_.dropped : 0));
     Text(line, fmtSmall_,
-         D2D1::RectF(strip.right - Px(560), strip.top + Px(10), strip.right - Px(18),
-                     strip.top + Px(28)),
+         D2D1::RectF(strip.right - Px(560), strip.top + Px(6), strip.right - Px(18),
+                     strip.top + Px(24)),
          kTextDim, DWRITE_TEXT_ALIGNMENT_TRAILING);
 
     std::wstring audio;
     if (previewSession_)
-        audio = L"Preview — sources appear when you Start";
+        audio = L"sources appear when you Start";
     else {
         audio = L"no audio";
         if (!stats_.desktopDevice.empty() && stats_.desktopDevice != L"-")
@@ -2584,24 +2725,23 @@ void UiApp::DrawPreviewStats(const D2D1_RECT_F& r) {
         if (!stats_.webcamName.empty()) audio += L"   ·   cam " + stats_.webcamName;
     }
     dc_->PushAxisAlignedClip(
-        D2D1::RectF(strip.left + Px(18), strip.top + Px(34), strip.right - Px(18),
-                    strip.bottom - Px(4)),
+        D2D1::RectF(strip.left + Px(18), strip.top + Px(26), strip.right - Px(18),
+                    strip.bottom - Px(3)),
         D2D1_ANTIALIAS_MODE_ALIASED);
     Text(audio, fmtSmall_,
-         D2D1::RectF(strip.left + Px(18), strip.top + Px(33), strip.right - Px(18),
-                     strip.bottom - Px(5)),
-         WithAlpha(kTextDim, 0.8f));
+         D2D1::RectF(strip.left + Px(18), strip.top + Px(25), strip.right - Px(18),
+                     strip.bottom - Px(4)),
+         WithAlpha(kTextDim, kHintAlpha));
     dc_->PopAxisAlignedClip();
 }
 
 void UiApp::DrawRecordCards() {
-    const float rowH = 32, gap = 4, pad = 10, headH = 18;
-    const float cy = 362, ch = pad + headH + 6 * rowH + 5 * gap + pad;
+    const float rowH = 30, gap = 4, pad = 10, headH = 18;
+    const float cy = 362, ch = pad + headH + 5 * rowH + 4 * gap + pad;
 
     // Two wider cards instead of three cramped ones: the encoder lives in
     // Settings > Encoding (it is not something you touch while recording).
-    const float rx = 320, rw = 352, rcw = rw - 2 * pad;
-    Card(rx, cy, rw, ch, L"RECORDING");
+    const float rx = 320, rw = 352, rcw = rw - 2 * pad;    Card(rx, cy, rw, ch, L"RECORDING");
     float y = cy + pad + headH + 4;
     D2D1_RECT_F pathR = S(rx + pad, y, rcw - 92, rowH);
     Panel(pathR, 8, kPanel, true);
@@ -2617,9 +2757,6 @@ void UiApp::DrawRecordCards() {
     y += rowH + gap;
     Toggle(ID_TOGGLE_TRACKS, S(rx + pad, y, rcw, rowH), L"Separate mic track",
            &separateTracks_);
-    y += rowH + gap;
-    Text(selContainer_ == 1 ? L"MP4 needs a clean stop" : L"MKV survives crashes",
-         fmtSmall_, S(rx + pad, y, rcw, rowH), WithAlpha(kTextDim, 0.7f));
     y += rowH + gap;
     Button(ID_OPENFOLDER, S(rx + pad, y, rcw, rowH), L"Open Folder", BtnStyle::Ghost);
 
@@ -2640,17 +2777,14 @@ void UiApp::DrawRecordCards() {
                                                                                       : 3]
                           .c_str())
              : L"Arm the replay buffer above",
-         fmtSmall_, S(cx + pad, y, ccw, rowH), WithAlpha(kTextDim, 0.7f));
+         fmtSmall_, S(cx + pad, y, ccw, rowH), WithAlpha(kTextDim, kHintAlpha));
     y += rowH + gap;
     Button(ID_CLIP, S(cx + pad, y, ccw, rowH), L"Save Clip", BtnStyle::Ghost,
            stats_.replayArmed);
-    y += rowH + gap;
-    Text(L"Clips land next to the recording", fmtSmall_, S(cx + pad, y, ccw, rowH),
-         WithAlpha(kTextDim, 0.7f));
 }
 
 void UiApp::DrawStreamCards() {
-    const float rowH = 32, gap = 4, pad = 10, headH = 18;
+    const float rowH = 30, gap = 4, pad = 10, headH = 18;
     const float cy = 362, ch = pad + headH + 6 * rowH + 5 * gap + pad;
 
     // Two wider cards: the stream encoder lives in Settings > Encoding.
@@ -2673,7 +2807,7 @@ void UiApp::DrawStreamCards() {
     Combo(ID_COMBO_STREAMCODEC, S(px + pad, y, pcw, rowH), streamCodecs_, &selStreamCodec_);
     y += rowH + gap;
     Text(L"Press Go Live to start", fmtSmall_, S(px + pad, y, pcw, rowH),
-         WithAlpha(kTextDim, 0.7f));
+         WithAlpha(kTextDim, kHintAlpha));
 
     // TWITCH ACCOUNT: connect once, then the stream key keeps itself current.
     const float tx = 684, tw = 356, tcw = tw - 2 * pad;
@@ -2686,7 +2820,7 @@ void UiApp::DrawStreamCards() {
         if (st.empty())
             st = connected ? (L"Connected as " + Widen(settings_.twitchChannel))
                            : L"Not connected — paste a key or connect";
-        Text(st, fmtSmall_, S(tx + pad, y, tcw, rowH), connected ? kOk : WithAlpha(kTextDim, 0.8f));
+        Text(st, fmtSmall_, S(tx + pad, y, tcw, rowH), connected ? kOk : WithAlpha(kTextDim, kHintAlpha));
     }
     y += rowH + gap;
     {
@@ -2704,16 +2838,16 @@ void UiApp::DrawStreamCards() {
               L"Client ID (optional)");
         y += rowH + gap;
         Text(L"Connect once — the key stays current", fmtSmall_, S(tx + pad, y, tcw, rowH),
-             WithAlpha(kTextDim, 0.7f));
+             WithAlpha(kTextDim, kHintAlpha));
         y += rowH + gap;
         Text(L"Key stored DPAPI-encrypted", fmtSmall_, S(tx + pad, y, tcw, rowH),
-             WithAlpha(kTextDim, 0.7f));
+             WithAlpha(kTextDim, kHintAlpha));
     }
 }
 
 void UiApp::DrawSceneSourcesCard(float x, float y, float w) {
     if (scenes_.empty()) return;
-    const float rowH = 32, rowGap = 5, pad = 10, headH = 18;
+    const float rowH = 30, rowGap = 5, pad = 10, headH = 18;
     const UiScene& sc = scenes_[activeScene_];
     const int n = (int)sc.sources.size();
     if (n <= 0) return;
@@ -2795,7 +2929,7 @@ void UiApp::RefreshBrowserPreview() {
 }
 
 void UiApp::DrawSettingsPage() {
-    const float rowH = 32, rowGap = 5, cardGap = 12, pad = 10, headH = 18;
+    const float rowH = 30, rowGap = 5, cardGap = 12, pad = 10, headH = 18;
     auto cardH = [&](float rows) {
         return pad + headH + rows * rowH + (rows - 1) * rowGap + pad;
     };
@@ -2845,7 +2979,7 @@ void UiApp::DrawSettingsPage() {
                 Combo(ID_COMBO_GPU, S(x + pad, y, cw, rowH), gpus_, &selGpu_);
                 y += rowH + rowGap;
                 Text(L"Defaults only — each Display/Window source picks its own target.",
-                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, kHintAlpha));
                 cy += cardH(4) + 20 + cardGap;
                 DrawSceneSourcesCard(x, cy, w);
                 break;
@@ -2863,13 +2997,13 @@ void UiApp::DrawSettingsPage() {
                 Field(ID_FIELD_CHROMA, S(x + pad + 146, y, 160, rowH), &chromaText_, false,
                       L"00FF00");
                 Text(L"key colour for the camera layer", fmtSmall_,
-                     S(x + pad + 318, y, cw - 318, rowH), WithAlpha(kTextDim, 0.7f));
+                     S(x + pad + 318, y, cw - 318, rowH), WithAlpha(kTextDim, kHintAlpha));
                 y += rowH + rowGap;
                 Text(L"Devices are chosen per source — click a source row on Record or Stream.",
-                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, kHintAlpha));
                 y += rowH + rowGap;
                 Text(L"Gate, compressor and monitoring are in Filters.", fmtSmall_,
-                     S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                     S(x + pad, y, cw, rowH), WithAlpha(kTextDim, kHintAlpha));
                 cy += cardH(4) + cardGap;
                 DrawSceneSourcesCard(x, cy, w);
                 break;
@@ -2896,15 +3030,15 @@ void UiApp::DrawSettingsPage() {
                 Slider(ID_SLIDER_COMPRATIO, S(x + pad, y, 226, rowH), 15, 60,
                        &settings_.micCompRatio, L"Ratio %.1f:1", 0.1f);
                 Text(L"-1 dB safety clip always on", fmtSmall_,
-                     S(x + pad + 244, y, cw - 244, rowH), WithAlpha(kTextDim, 0.7f));
+                     S(x + pad + 244, y, cw - 244, rowH), WithAlpha(kTextDim, kHintAlpha));
                 y += rowH + rowGap;
                 Toggle(ID_TOGGLE_MONITOR, S(x + pad, y, 221, rowH), L"Monitor mic",
                        &settings_.monitorMic);
                 Text(L"headphones recommended", fmtSmall_,
-                     S(x + pad + 249, y, cw - 249, rowH), WithAlpha(kTextDim, 0.7f));
+                     S(x + pad + 249, y, cw - 249, rowH), WithAlpha(kTextDim, kHintAlpha));
                 y += rowH + rowGap;
                 Text(L"Presets set both filters; the sliders stay live while recording.",
-                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, kHintAlpha));
                 cy += cardH(6) + cardGap;
                 Card(x, cy, w, cardH(3), L"HOW THESE HELP");
                 y = cy + pad + headH + 4;
@@ -2943,14 +3077,14 @@ void UiApp::DrawSettingsPage() {
                             D2D1::Ellipse(D2D1::Point2F((sr.left + sr.right) / 2,
                                                         (sr.top + sr.bottom) / 2),
                                           sw / 2 + Px(1), sw / 2 + Px(1)),
-                            Br(WithAlpha(kTextDim, 0.7f)), Px(1));
+                            Br(WithAlpha(kTextDim, kHintAlpha)), Px(1));
                     sx += sw + swGap;
                 }
                 Toggle(ID_TOGGLE_LIGHT, S(x + pad + 292, y, cw - 292, rowH), L"Light mode",
                        &settings_.light);
                 y += rowH + rowGap;
                 Text(L"The accent repaints instantly and is remembered next launch.", fmtSmall_,
-                     S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                     S(x + pad, y, cw, rowH), WithAlpha(kTextDim, kHintAlpha));
                 cy += cardH(2) + cardGap;
                 Card(x, cy, w, cardH(2), L"THEME SAMPLE");
                 y = cy + pad + headH + 4;
@@ -2965,7 +3099,7 @@ void UiApp::DrawSettingsPage() {
                 }
                 y += rowH + rowGap;
                 Text(L"Every screen uses these controls — this is the current theme.",
-                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, kHintAlpha));
                 break;
             }
             case 4: {  // ---------------------------------------------- Browser
@@ -2984,17 +3118,17 @@ void UiApp::DrawSettingsPage() {
                 Text(browserStatus_.empty() ? L"not started" : browserStatus_, fmtSmall_,
                      S(x + pad + 266, y, cw - 266, rowH),
                      browserStatus_.rfind(L"load failed", 0) == 0 ? kRec
-                                                                  : WithAlpha(kTextDim, 0.75f));
+                                                                  : WithAlpha(kTextDim, kHintAlpha));
                 dc_->PopAxisAlignedClip();
                 y += rowH + rowGap;
                 Text(SceneUsesBrowser()
                          ? L"Live: the overlay reloads a moment after you stop typing."
                          : L"No Browser source in this scene — press Test overlay to add one.",
                      fmtSmall_, S(x + pad, y, cw, rowH),
-                     SceneUsesBrowser() ? WithAlpha(kText, 0.85f) : WithAlpha(kTextDim, 0.75f));
+                     SceneUsesBrowser() ? WithAlpha(kText, 0.85f) : WithAlpha(kTextDim, kHintAlpha));
                 y += rowH + rowGap;
                 Text(L"Twitch chat: https://www.twitch.tv/embed/<channel>/chat?parent=localhost",
-                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, kHintAlpha));
                 y += rowH + rowGap;
 
                 // Dedicated overlay preview: the browser's own render (what the
@@ -3002,6 +3136,9 @@ void UiApp::DrawSettingsPage() {
                 D2D1_RECT_F pv = S(x + pad, y, cw, pvH);
                 Panel(pv, 10, kPanel2, true);
                 if (browserPrevBmp_ && browserPrevW_ && browserPrevH_) {
+                    // Draw the page over a neutral backdrop: an overlay page is
+                    // transparent by design, and over the dark card that read as
+                    // "nothing is rendering".
                     const float sc =
                         (std::min)((pv.right - pv.left - Px(2)) / (float)browserPrevW_,
                                    (pv.bottom - pv.top - Px(2)) / (float)browserPrevH_);
@@ -3011,13 +3148,17 @@ void UiApp::DrawSettingsPage() {
                                                   (pv.left + pv.right) / 2 + dw / 2,
                                                   (pv.top + pv.bottom) / 2 + dh / 2);
                     dc_->PushAxisAlignedClip(pv, D2D1_ANTIALIAS_MODE_ALIASED);
+                    dc_->FillRectangle(dst, Br(settings_.light ? D2D1::ColorF(0xF2F2F2)
+                                                               : D2D1::ColorF(0x2A2A30)));
                     dc_->DrawBitmap(browserPrevBmp_.Get(), dst, 1.0f,
                                     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
                     dc_->PopAxisAlignedClip();
+                    Text(L"page view (transparent areas show the backdrop)", fmtSmall_,
+                         S(x + pad, y + pvH - 20, cw, 16), WithAlpha(kTextDim, kHintAlpha));
                 } else {
                     Text(SceneUsesBrowser() ? L"Waiting for the overlay to paint…"
                                             : L"No Browser source yet — press Test overlay",
-                         fmtSmall_, pv, WithAlpha(kTextDim, 0.8f),
+                         fmtSmall_, pv, WithAlpha(kTextDim, kHintAlpha),
                          DWRITE_TEXT_ALIGNMENT_CENTER);
                 }
                 break;
@@ -3033,14 +3174,14 @@ void UiApp::DrawSettingsPage() {
                 Toggle(ID_TOGGLE_FADE, S(x + pad, y, 221, rowH), L"Scene fade",
                        &settings_.sceneFade);
                 Text(L"250 ms crossfade when switching scenes", fmtSmall_,
-                     S(x + pad + 249, y, 221, rowH), WithAlpha(kTextDim, 0.7f));
+                     S(x + pad + 249, y, 221, rowH), WithAlpha(kTextDim, kHintAlpha));
                 y += rowH + rowGap;
                 Text(L"Close to tray: the X button hides the window and keeps the app running — "
                      L"Exit from the tray menu (right-click the icon) to quit.",
-                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, kHintAlpha));
                 y += rowH + rowGap;
                 Text(L"The camera opens only while recording, streaming or replay is armed.",
-                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, kHintAlpha));
                 cy += cardH(4) + cardGap;
                 Card(x, cy, w, cardH(4), L"WHAT HAPPENS");
                 y = cy + pad + headH + 4;
@@ -3064,7 +3205,7 @@ void UiApp::DrawSettingsPage() {
                 y += rowH + rowGap;
                 Text(L"The camera opens only while recording, streaming or the replay buffer is "
                      L"armed.",
-                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.75f));
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, kHintAlpha));
                 break;
             }
             case 6: {  // -------------------------------------------- Encoding
@@ -3106,10 +3247,10 @@ void UiApp::DrawSettingsPage() {
                        &settings_.streamMultipass);
                 y += rowH + rowGap;
                 Text(L"CBR at the bitrate set on the Stream page", fmtSmall_,
-                     S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                     S(x + pad, y, cw, rowH), WithAlpha(kTextDim, kHintAlpha));
                 y += rowH + rowGap;
                 Text(L"Two-pass: slower, better quality at the same bitrate", fmtSmall_,
-                     S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                     S(x + pad, y, cw, rowH), WithAlpha(kTextDim, kHintAlpha));
                 break;
             }
             case 7: {  // -------------------------------------------------- Help
@@ -3147,10 +3288,10 @@ void UiApp::DrawSettingsPage() {
                 y += rowH + rowGap;
                 Text(L"Copy Log puts the last 200 log lines on the clipboard — one click to send "
                      L"me what happened.",
-                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, kHintAlpha));
                 y += rowH + rowGap;
                 Text(L"Report Bug writes a redacted system report and opens the issue form.",
-                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, kHintAlpha));
                 break;
             }
             default: {  // ---------------------------------------------- About
@@ -3169,18 +3310,28 @@ void UiApp::DrawSettingsPage() {
                      fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kText, 0.85f));
                 y += rowH + rowGap;
                 Text(L"Report Bug collects OS/GPU/log diagnostics and opens the issue form.",
-                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                     fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, kHintAlpha));
                 break;
             }
         }
         // A short category must not leave a dead rectangle: stretch its last
         // card down to the activity strip (its rows stay at the top).
+        // A short category must not leave a dead rectangle: extend its last card
+        // down to the activity strip. Only the area *below* the content is filled
+        // (repainting the whole card washed its contents out), and the outline is
+        // redrawn so the card still reads as one surface.
         const float contentBottom = 596;
         if (lastCardW_ > 0 && lastCardH_ >= 110 &&
             lastCardY_ + lastCardH_ + 40 < contentBottom) {
-            Card(lastCardX_, lastCardY_, lastCardW_, contentBottom - lastCardY_, lastCardTitle_);
-            // Anchor the bottom of the roomy card with a footer note: space reads
-            // as deliberate instead of empty.
+            const float overlap = 10.f;  // hides the extension's rounded top edge
+            D2D1_RECT_F ext =
+                S(lastCardX_, lastCardY_ + lastCardH_ - overlap, lastCardW_,
+                  (contentBottom - lastCardY_ - lastCardH_) + overlap);
+            dc_->FillRoundedRectangle(D2D1::RoundedRect(ext, Px(12), Px(12)),
+                                      Br(WithAlpha(kPanel, 0.85f)));
+            D2D1_RECT_F full = S(lastCardX_, lastCardY_, lastCardW_, contentBottom - lastCardY_);
+            dc_->DrawRoundedRectangle(D2D1::RoundedRect(full, Px(12), Px(12)), Br(kBorder),
+                                      Px(1));
             Text(L"Saved to %APPDATA%\\Ulticast\\settings.ini", fmtSmall_,
                  S(lastCardX_ + 14, contentBottom - 26, lastCardW_ - 28, 18),
                  WithAlpha(kTextDim, 0.55f));
@@ -3192,7 +3343,7 @@ void UiApp::DrawSettingsPage() {
         const float px = 732, pw = 308;
         DrawPreview(S(px, 64, pw, 173));
         Text(L"Live preview", fmtSmall_, S(px, 64 + 173 + 6, pw, 18),
-             WithAlpha(kTextDim, 0.75f));
+             WithAlpha(kTextDim, kHintAlpha));
 
         const float sy = 64 + 173 + 30;
         Card(px, sy, pw, cardH(4), L"STATUS");
@@ -3200,17 +3351,17 @@ void UiApp::DrawSettingsPage() {
         const float lx = px + pad, lw = pw - 2 * pad;
         Text(stats_.recording ? Format(L"Recording   %s", FormatTime(stats_.recSeconds).c_str())
                               : L"Recording   idle",
-             fmtSmall_, S(lx, y, lw, rowH), stats_.recording ? kRec : WithAlpha(kTextDim, 0.8f));
+             fmtSmall_, S(lx, y, lw, rowH), stats_.recording ? kRec : WithAlpha(kTextDim, kHintAlpha));
         y += rowH + rowGap;
         Text(stats_.streaming ? Format(L"Streaming   %s", FormatTime(stats_.strSeconds).c_str())
                               : L"Streaming   idle",
              fmtSmall_, S(lx, y, lw, rowH),
-             stats_.streaming ? kAccent : WithAlpha(kTextDim, 0.8f));
+             stats_.streaming ? kAccent : WithAlpha(kTextDim, kHintAlpha));
         y += rowH + rowGap;
         Text(stats_.replayArmed ? Format(L"Replay buffer   armed (%d s)", settings_.replaySeconds)
                                 : L"Replay buffer   off",
              fmtSmall_, S(lx, y, lw, rowH),
-             stats_.replayArmed ? kText : WithAlpha(kTextDim, 0.8f));
+             stats_.replayArmed ? kText : WithAlpha(kTextDim, kHintAlpha));
         y += rowH + rowGap;
         Text(sessionRunning_ && stats_.width
                  ? Format(L"Capture   %ux%u  ·  %s", stats_.width, stats_.height,
@@ -3219,7 +3370,7 @@ void UiApp::DrawSettingsPage() {
              fmtSmall_, S(lx, y, lw, rowH), WithAlpha(kText, 0.85f));
 
         Text(L"Preview runs while idle (Behavior).", fmtSmall_,
-             S(px, sy + cardH(4) + 8, pw, 18), WithAlpha(kTextDim, 0.7f));
+             S(px, sy + cardH(4) + 8, pw, 18), WithAlpha(kTextDim, kHintAlpha));
     }
 
     DrawActivityStrip(S(20, 606, 1020, 28), 2);
@@ -3325,13 +3476,14 @@ void UiApp::DrawPopup() {
         D2D1_RECT_F hint = D2D1::RectF(list.left, list.bottom - Px(16), list.right - Px(10),
                                        list.bottom);
         std::wstring s = Format(L"%d / %d  (scroll)", popupScroll_ + shown, total);
-        Text(s, fmtSmall_, hint, WithAlpha(kTextDim, 0.8f), DWRITE_TEXT_ALIGNMENT_TRAILING);
+        Text(s, fmtSmall_, hint, WithAlpha(kTextDim, kHintAlpha), DWRITE_TEXT_ALIGNMENT_TRAILING);
     }
 }
 
 void UiApp::Card(float x, float y, float w, float h, const std::wstring& title) {
-    Panel(S(x, y, w, h), 12, WithAlpha(kPanel, 0.5f), true);
-    Text(title, fmtSection_, S(x + 14, y + 9, w - 28, 16), WithAlpha(kTextDim, 0.95f));
+    // One quiet surface per card: a solid-ish fill and a single hairline border.
+    Panel(S(x, y, w, h), 12, WithAlpha(kPanel, 0.85f), true);
+    Text(title, fmtSection_, S(x + 14, y + 8, w - 28, 14), WithAlpha(kTextDim, kHintAlpha));
     // Remember the last card so a short category can stretch it to the bottom
     // instead of leaving a dead rectangle under it.
     lastCardX_ = x;
@@ -3563,6 +3715,8 @@ void UiApp::ApplySettingsToUi() {
             u.flipH = (ss.flags & 1) != 0;
             u.flipV = (ss.flags & 2) != 0;
             u.rotate = (ss.flags >> 2) & 3;
+            u.wFrac = ss.wFrac;
+            u.hFrac = ss.hFrac;
             us.sources.push_back(u);
         }
         EnsureSceneDefaults(us);
@@ -3637,6 +3791,8 @@ void UiApp::SyncSettingsFromUi() {
             ss.camX = src.camX;
             ss.camY = src.camY;
             ss.flags = (src.flipH ? 1 : 0) | (src.flipV ? 2 : 0) | ((src.rotate & 3) << 2);
+            ss.wFrac = src.wFrac;
+            ss.hFrac = src.hFrac;
             us.sources.push_back(ss);
         }
         settings_.scenes.push_back(us);
@@ -3680,6 +3836,11 @@ std::vector<SessionSource> UiApp::SceneSources(const UiScene& sc) const {
         ss.corner = s.corner;
         ss.xr = s.camX;
         ss.yr = s.camY;
+        ss.wr = s.wFrac;
+        ss.hr = s.hFrac;
+        ss.flipH = s.flipH;
+        ss.flipV = s.flipV;
+        ss.rotate = s.rotate;
         ss.audioDevice = Widen(s.device);
         out.push_back(ss);
     }
@@ -4125,6 +4286,187 @@ void UiApp::UpdateUiTick() {
     }
 }
 
+LRESULT CALLBACK UiApp::PopOutProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    auto* app = reinterpret_cast<UiApp*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (msg == WM_NCCREATE) {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lp);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
+        return TRUE;
+    }
+    if (!app) return DefWindowProcW(hwnd, msg, wp, lp);
+    switch (msg) {
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            BeginPaint(hwnd, &ps);
+            app->PaintPopOut();
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        case WM_SIZE:
+            app->ResizePopOut(LOWORD(lp), HIWORD(lp));
+            return 0;
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_KEYDOWN:
+            if (wp == VK_F11) {
+                app->TogglePopOutFullscreen(!app->popFullscreen_);
+                return 0;
+            }
+            if (wp == VK_ESCAPE && app->popFullscreen_) {
+                app->TogglePopOutFullscreen(false);
+                return 0;
+            }
+            return 0;
+        case WM_LBUTTONDBLCLK:
+            app->TogglePopOutFullscreen(!app->popFullscreen_);
+            return 0;
+        case WM_CLOSE:
+            app->TogglePopOutPreview(false);
+            return 0;
+        case WM_DESTROY:
+            app->popHwnd_ = nullptr;
+            return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+void UiApp::EnsurePopOutTarget() {
+    if (!popSwap_) return;
+    ComPtr<IDXGISurface> surface;
+    if (FAILED(popSwap_->GetBuffer(0, IID_PPV_ARGS(surface.GetAddressOf())))) return;
+    D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
+    popTarget_.Reset();
+    dc_->CreateBitmapFromDxgiSurface(surface.Get(), &props, popTarget_.GetAddressOf());
+}
+
+void UiApp::ResizePopOut(UINT w, UINT h) {
+    if (!popSwap_ || w == 0 || h == 0) return;
+    dc_->SetTarget(nullptr);
+    popTarget_.Reset();
+    if (FAILED(popSwap_->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0))) return;
+    EnsurePopOutTarget();
+    InvalidateRect(popHwnd_, nullptr, FALSE);
+}
+
+void UiApp::TogglePopOutPreview(bool on) {
+    if (on == (popHwnd_ != nullptr)) return;
+    if (on) {
+        if (!d3d_ || !d2dFactory_) return;
+        ComPtr<IDXGIDevice> dxgiDevice;
+        if (FAILED(d3d_.As(&dxgiDevice))) return;
+        ComPtr<IDXGIAdapter> adapter;
+        if (FAILED(dxgiDevice->GetAdapter(&adapter))) return;
+        ComPtr<IDXGIFactory2> factory;
+        if (FAILED(adapter->GetParent(IID_PPV_ARGS(factory.GetAddressOf())))) return;
+
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = &UiApp::PopOutProc;
+        wc.hInstance = instance_;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.lpszClassName = L"UlticastPreviewWindow";
+        RegisterClassExW(&wc);
+
+        RECT cr{};
+        GetClientRect(hwnd_, &cr);
+        const int w = (cr.right - cr.left) * 3 / 4;
+        const int h = (cr.bottom - cr.top) * 3 / 4;
+        popHwnd_ = CreateWindowExW(0, wc.lpszClassName, L"Ulticast - preview",
+                                   WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, w, h, nullptr,
+                                   nullptr, instance_, this);
+        if (!popHwnd_) return;
+
+        DXGI_SWAP_CHAIN_DESC1 sd{};
+        sd.Width = (UINT)w;
+        sd.Height = (UINT)h;
+        sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        sd.SampleDesc.Count = 1;
+        sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        sd.BufferCount = 2;
+        sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        if (FAILED(factory->CreateSwapChainForHwnd(d3d_.Get(), popHwnd_, &sd, nullptr, nullptr,
+                                                  popSwap_.GetAddressOf()))) {
+            DestroyWindow(popHwnd_);
+            popHwnd_ = nullptr;
+            return;
+        }
+        EnsurePopOutTarget();
+        ShowWindow(popHwnd_, SW_SHOW);
+        UpdateWindow(popHwnd_);
+        statusText_ = L"Preview popped out - drag its edges to resize, F11 to fill it";
+        statusError_ = false;
+    } else {
+        if (popHwnd_) {
+            dc_->SetTarget(target_.Get());  // never leave the shared context on a dead surface
+            popTarget_.Reset();
+            popSwap_.Reset();
+            DestroyWindow(popHwnd_);
+            popHwnd_ = nullptr;
+            popFullscreen_ = false;
+        }
+    }
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void UiApp::TogglePopOutFullscreen(bool on) {
+    if (!popHwnd_ || on == popFullscreen_) return;
+    popFullscreen_ = on;
+    if (on) {
+        popSavedStyle_ = GetWindowLongW(popHwnd_, GWL_STYLE);
+        GetWindowRect(popHwnd_, &popSavedRect_);
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        if (GetMonitorInfoW(MonitorFromWindow(popHwnd_, MONITOR_DEFAULTTONEAREST), &mi)) {
+            SetWindowLongW(popHwnd_, GWL_STYLE, (popSavedStyle_ & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
+            SetWindowPos(popHwnd_, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                         mi.rcMonitor.right - mi.rcMonitor.left,
+                         mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_FRAMECHANGED);
+        }
+    } else {
+        SetWindowLongW(popHwnd_, GWL_STYLE, popSavedStyle_);
+        SetWindowPos(popHwnd_, nullptr, popSavedRect_.left, popSavedRect_.top,
+                     popSavedRect_.right - popSavedRect_.left,
+                     popSavedRect_.bottom - popSavedRect_.top, SWP_FRAMECHANGED | SWP_NOZORDER);
+    }
+    InvalidateRect(popHwnd_, nullptr, FALSE);
+}
+
+void UiApp::PaintPopOut() {
+    if (!popSwap_ || !dc_) return;
+    if (!popTarget_) EnsurePopOutTarget();
+    if (!popTarget_) return;
+    dc_->SetTarget(popTarget_.Get());
+    dc_->BeginDraw();
+    dc_->SetTransform(D2D1::Matrix3x2F::Identity());
+    dc_->Clear(kBg);
+    RECT cr{};
+    GetClientRect(popHwnd_, &cr);
+    const float W = (float)(cr.right - cr.left), H = (float)(cr.bottom - cr.top);
+    if (previewBmp_ && previewW_ && previewH_) {
+        const float sc = (std::min)(W / (float)previewW_, H / (float)previewH_);
+        const float w = previewW_ * sc, h = previewH_ * sc;
+        D2D1_RECT_F dst = D2D1::RectF((W - w) / 2, (H - h) / 2, (W + w) / 2, (H + h) / 2);
+        dc_->DrawBitmap(previewBmp_.Get(), dst, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+    } else {
+        Text(L"NO SIGNAL", fmtSection_, D2D1::RectF(0, H / 2 - Px(12), W, H / 2 + Px(12)),
+             kTextDim, DWRITE_TEXT_ALIGNMENT_CENTER);
+    }
+    const double fps =
+        (sessionRunning_ && stats_.elapsed > 0.1) ? stats_.captured / stats_.elapsed : 0.0;
+    std::wstring line = Format(L"%.0f fps   ·   view %.0f fps   ·   F11 fullscreen", fps,
+                               previewFps_);
+    const float tw = MeasureText(line, fmtSmall_.Get()) + Px(24);
+    D2D1_RECT_F strip = D2D1::RectF(Px(12), H - Px(34), Px(12) + tw, H - Px(10));
+    dc_->FillRoundedRectangle(D2D1::RoundedRect(strip, Px(6), Px(6)),
+                              Br(WithAlpha(kBlack, 0.45f)));
+    Text(line, fmtSmall_, strip, kText, DWRITE_TEXT_ALIGNMENT_CENTER);
+    const HRESULT hr = dc_->EndDraw();
+    if (hr == D2DERR_RECREATE_TARGET) EnsurePopOutTarget();
+    popSwap_->Present(1, 0);
+}
+
 void UiApp::TogglePreviewFullscreen(bool on) {
     if (on == previewFullscreen_) return;
     previewFullscreen_ = on;
@@ -4395,6 +4737,9 @@ void UiApp::OnAction(int id) {
             break;
         case ID_PREVIEW_FULL:
             TogglePreviewFullscreen(!previewFullscreen_);
+            break;
+        case ID_PREVIEW_POP:
+            TogglePopOutPreview(popHwnd_ == nullptr);
             break;
         case ID_COPYLOG: {
             // One click: the log tail on the clipboard, ready to paste into a chat.
@@ -4706,22 +5051,27 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
             }
-            if (draggingWebcam_ && !scenes_.empty() && stats_.width && previewW_ && previewH_) {
+            if (dragLayer_ >= 0 && !scenes_.empty() && stats_.width && previewW_ && previewH_) {
                 D2D1_RECT_F pr = PreviewRect();
-                const float sc = (std::min)((pr.right - pr.left) / (float)previewW_,
-                                            (pr.bottom - pr.top) / (float)previewH_);
-                const float ox = (pr.left + pr.right) / 2 - previewW_ * sc / 2;
-                const float oy = (pr.top + pr.bottom) / 2 - previewH_ * sc / 2;
-                const float canvasW = (float)stats_.width, canvasH = (float)stats_.height;
-                const float camW = canvasW / 4.0f, camH = camW * 3.0f / 4.0f;
-                float cx = ((x - dragOffX_) - ox) / sc;
-                float cy = ((y - dragOffY_) - oy) / sc;
-                cx = std::clamp(cx, 0.f, (std::max)(0.f, canvasW - camW));
-                cy = std::clamp(cy, 0.f, (std::max)(0.f, canvasH - camH));
-                const int vi = FirstVideoSourceIndex();
-                if (vi >= 0) {
-                    scenes_[activeScene_].sources[vi].camX = cx / canvasW;
-                    scenes_[activeScene_].sources[vi].camY = cy / canvasH;
+                float cx = 0, cy = 0;
+                PreviewDeviceToCanvas(pr, x, y, &cx, &cy);
+                UiScene& scn = scenes_[activeScene_];
+                if (dragLayer_ < (int)scn.sources.size()) {
+                    UiSource& s = scn.sources[dragLayer_];
+                    const float cw = (float)stats_.width, chh = (float)stats_.height;
+                    if (dragResize_) {
+                        float lx = 0, ly = 0;
+                        for (const auto& lr : session_.LayerRects())
+                            if (lr.index == dragLayer_) {
+                                lx = lr.x;
+                                ly = lr.y;
+                            }
+                        s.wFrac = std::clamp((cx - lx) / cw, 0.04f, 1.f);
+                        s.hFrac = std::clamp((cy - ly) / chh, 0.04f, 1.f);
+                    } else {
+                        s.camX = std::clamp((cx - dragOffX_) / cw, 0.f, 1.f);
+                        s.camY = std::clamp((cy - dragOffY_) / chh, 0.f, 1.f);
+                    }
                     PushSceneSources();
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
@@ -4778,11 +5128,41 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 dragging_ = press_;
                 SetSliderFromX(press_, x);
             }
-            if (press_ == ID_PREVIEW_WEBCAM) {
-                draggingWebcam_ = true;
-                D2D1_RECT_F wr = PreviewWebcamRect(PreviewRect());
-                dragOffX_ = x - wr.left;
-                dragOffY_ = y - wr.top;
+            if (press_ == ID_PREVIEW_AREA) {
+                D2D1_RECT_F pr = PreviewRect();
+                const int hit = LayerAtDevicePoint(pr, x, y);
+                // A handle on the current selection starts a resize.
+                bool resize = false;
+                if (selectedSource_ >= 0) {
+                    const float hs = Px(9);
+                    for (const auto& lr : session_.LayerRects()) {
+                        if (lr.index != selectedSource_) continue;
+                        const D2D1_RECT_F r = LayerDeviceRect(lr, pr);
+                        const D2D1_POINT_2F cs[4] = {D2D1::Point2F(r.left, r.top),
+                                                     D2D1::Point2F(r.right, r.top),
+                                                     D2D1::Point2F(r.left, r.bottom),
+                                                     D2D1::Point2F(r.right, r.bottom)};
+                        for (const auto& c : cs)
+                            if (std::abs(x - c.x) <= hs && std::abs(y - c.y) <= hs) resize = true;
+                    }
+                }
+                if (hit >= 0 || resize) {
+                    if (hit >= 0) selectedSource_ = hit;
+                    dragLayer_ = selectedSource_;
+                    dragResize_ = resize;
+                    float cx = 0, cy = 0;
+                    PreviewDeviceToCanvas(pr, x, y, &cx, &cy);
+                    float lx = 0, ly = 0;
+                    for (const auto& lr : session_.LayerRects())
+                        if (lr.index == selectedSource_) {
+                            lx = lr.x;
+                            ly = lr.y;
+                        }
+                    dragOffX_ = cx - lx;
+                    dragOffY_ = cy - ly;
+                } else {
+                    selectedSource_ = -1;
+                }
             }
             SetCapture(hwnd_);
 
@@ -4881,6 +5261,13 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             float x = (float)GET_X_LPARAM(lp), y = (float)GET_Y_LPARAM(lp);
             const bool wasDraggingSlider = dragging_ != 0;
             dragging_ = 0;
+            if (dragLayer_ >= 0) {
+                // Persist the new position/size of the dragged layer.
+                dragLayer_ = -1;
+                dragResize_ = false;
+                SyncSettingsFromUi();
+                SaveUiSettings(settings_);
+            }
             if (draggingWebcam_) {
                 draggingWebcam_ = false;
                 SyncSettingsFromUi();

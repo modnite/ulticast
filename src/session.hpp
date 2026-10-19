@@ -35,6 +35,9 @@ struct SessionSource {
     // Optional fractional position (0..1 of the canvas) for video PiPs;
     // -1 = use the corner preset. Used by drag-to-move on the UI preview.
     float xr = -1.f, yr = -1.f;
+    // Optional fractional size (0..1 of the canvas); -1 = the source's default.
+    // Set by drag-to-resize on the UI preview.
+    float wr = -1.f, hr = -1.f;
     // Expanded settings (all optional; empty/0 = defaults):
     std::string device;        // Video: capture-device name substring ("" = default)
     int monitor = 0;           // Capture: monitor index for WGC/DXGI
@@ -178,6 +181,16 @@ public:
     bool BrowserFrame(std::vector<uint8_t>* out, uint32_t* w, uint32_t* h, uint64_t* ver) {
         return browserOn_ && browser_.GetLatest(out, w, h, ver);
     }
+    // Where each scene layer was last composited, in canvas pixels: the UI uses
+    // this for selection, drag-to-move and drag-to-resize on the preview.
+    struct LayerRect {
+        int index = -1;  // source index within the scene
+        float x = 0, y = 0, w = 0, h = 0;
+    };
+    std::vector<LayerRect> LayerRects() const {
+        std::lock_guard<std::mutex> lk(layerRectMu_);
+        return layerRects_;
+    }
     // The overlay's GPU texture (shared) + frame counter: the UI draws it
     // zero-copy, instead of uploading a 9 MB CPU buffer per frame.
     Microsoft::WRL::ComPtr<ID3D11Texture2D> BrowserTexture(uint64_t* frameNo) const;
@@ -276,6 +289,8 @@ private:
     std::thread supervisor_;
     mutable std::mutex previewMu_;
     mutable std::mutex browserTexMu_;  // guards the overlay texture handoff to the UI
+    mutable std::mutex layerRectMu_;
+    std::vector<LayerRect> layerRects_;  // last composited layer rects (canvas px)
 
     mutable std::mutex errMu_;
     mutable std::string failErr_;

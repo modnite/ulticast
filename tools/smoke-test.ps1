@@ -190,14 +190,20 @@ foreach ($backend in @('dxgi', 'wgc')) {
         $ib = New-Object System.Drawing.Bitmap "$t\nocursor-$backend.png"
         $found = $false
         $diff = 0
-        for ($y = 0; $y -lt $ia.Height -and -not $found; $y += 2) {
-            for ($x = 0; $x -lt $ia.Width -and -not $found; $x += 2) {
+        # Sample densely around wherever the pointer actually is: it can be nudged
+        # by other windows, and a whole-frame scan at step 2 was flaky.
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+        $cp = [System.Windows.Forms.Cursor]::Position
+        $x0 = [Math]::Max(0, $cp.X - 150); $x1 = [Math]::Min($ia.Width - 1, $cp.X + 150)
+        $y0 = [Math]::Max(0, $cp.Y - 150); $y1 = [Math]::Min($ia.Height - 1, $cp.Y + 150)
+        for ($y = $y0; $y -le $y1 -and -not $found; $y++) {
+            for ($x = $x0; $x -le $x1 -and -not $found; $x++) {
                 $pa = $ia.GetPixel($x, $y)
                 $pb = $ib.GetPixel($x, $y)
                 $d = [Math]::Abs($pa.R - $pb.R) + [Math]::Abs($pa.G - $pb.G) + [Math]::Abs($pa.B - $pb.B)
                 if ($d -gt 90) {
                     $diff++
-                    if ($diff -ge 6) { $found = $true }   # the arrow is ~100+ pixels
+                    if ($diff -ge 8) { $found = $true }   # the arrow is ~100+ pixels
                 }
             }
         }

@@ -126,10 +126,11 @@ static std::string Sanitize(const std::string& s) {
 }
 
 static std::string EncodeSource(const UiSourceSetting& s) {
-    // type:device:enabled:monitor:window:dxgi:corner:camX:camY:flags
-    char num[192];
-    sprintf_s(num, "%d:%d:%s:%d:%d:%.4f:%.4f:%d", s.enabled ? 1 : 0, s.monitor,
-              Sanitize(s.window).c_str(), s.dxgi ? 1 : 0, s.corner, s.camX, s.camY, s.flags);
+    // type:device:enabled:monitor:window:dxgi:corner:camX:camY:flags:wFrac:hFrac
+    char num[256];
+    sprintf_s(num, "%d:%d:%s:%d:%d:%.4f:%.4f:%d:%.4f:%.4f", s.enabled ? 1 : 0, s.monitor,
+              Sanitize(s.window).c_str(), s.dxgi ? 1 : 0, s.corner, s.camX, s.camY, s.flags,
+              s.wFrac, s.hFrac);
     return std::to_string(s.type) + ":" + Sanitize(s.device) + ":" + num;
 }
 
@@ -160,6 +161,8 @@ static bool ParseScene(const std::string& val, UiSceneSetting* sc) {
                 if (f.size() > 7) src.camX = (float)atof(f[7].c_str());
                 if (f.size() > 8) src.camY = (float)atof(f[8].c_str());
                 if (f.size() > 9) src.flags = atoi(f[9].c_str());
+                if (f.size() > 10) src.wFrac = (float)atof(f[10].c_str());
+                if (f.size() > 11) src.hFrac = (float)atof(f[11].c_str());
                 if (src.corner < 0 || src.corner > 3) src.corner = 3;
                 sc->sources.push_back(src);
             }

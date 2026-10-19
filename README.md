@@ -131,6 +131,15 @@ Please attach `diagnostics-*.txt` and the newest log to
   sliders; Record and Stream lost their third card (the encoders moved to **Settings > Encoding**);
   labels are ellipsized instead of clipped; the window cannot be shrunk below a readable size —
   released in v0.9.5
+- **Stage 18** the preview now tracks the capture rate: the engine was copying the preview texture
+  only every third frame (a hard ~20 fps ceiling) and the UI's WM_TIMER coalesced against pending
+  paints (about half the requested rate). The copy happens every frame, the paint self-schedules at
+  the configured rate with a 1 ms system timer, and vsync is dropped while live so a hidden window
+  cannot stall the loop. Measured: **capture 59 fps / preview 59 fps, 3.9 ms per frame**. Also:
+  a **dedicated overlay preview** in Settings > Browser (the browser's own render, drawn zero-copy
+  from a shared texture), the overlay **reloads as you type** its URL (and a bare host such as
+  `example.com` is now treated as a web address, not a file), the page switcher became a **menu
+  bar** with an accent underline, and slider drags persist on release — released in v0.9.6
 - Next: on-hardware validation on the RTX 3080 rig
 
 ## The UI (Ulticast-ui.exe)
@@ -193,6 +202,11 @@ together (the same separation ShadowPlay/OBS users expect).
 - **Settings you can see the effect of**: the page is split into categories and keeps the **live
   preview** on screen, so camera, chroma and audio changes are judged while you make them (the
   VLC-redesign lesson: never hide the picture while tweaking).
+- **The preview runs at the capture rate.** The engine hands the composited frame to the UI every
+  frame over a shared texture (no CPU copy, no readback) and the paint self-schedules at the
+  configured fps; the stats strip shows both the capture and the on-screen rate (`view 59 fps`).
+- **Browser overlays have their own preview** in Settings > Browser: the overlay's render, not the
+  scene, updated as you type the URL (a bare `example.com` is treated as `https://example.com`).
 - **Keyboard access**: Tab / Shift+Tab move a focus ring through every control on the page,
   Enter/Space activate the focused one, arrows drive open popups and adjust focused sliders, and
   Esc closes menus or leaves a text box. Clicking a control focuses it too, so the keyboard takes
@@ -220,6 +234,8 @@ together (the same separation ShadowPlay/OBS users expect).
 | **Tray & exit** | the icon is removed while the window still exists (no ghost in the notification area); with the browser overlay live, tray **Exit** quits in ~0.3 s; X with "Close to tray" hides the window and shows a one-time tray notice |
 | **Window source guard** | a window source with no window refuses to start ("window source has no window selected") instead of capturing the monitor — asserted in the UI harness against a crafted scene |
 | **Keyboard navigation** | Tab/Shift+Tab focus ring, Enter/Space activation, arrows on popups and sliders — asserted by the UI harness (pixel + settings checks) |
+| **Preview rate** | measured on screen: capture 59 fps / preview 59 fps, 3.9 ms per frame (the strip shows both; the engine used to hand over every third frame) |
+| **Menu bar** | Record / Stream / Settings as flat menu items with an accent underline; the status pill (PREVIEW / RECORDING / LIVE) stays on the right |
 | Settings persistence | `settings.ini` written and re-loaded on next launch |
 | Engine regressions (CLI) | pause (8 s → 6 s media), webcam + replay + audio combo, RTMP round-trip |
 | **Dual output** | H.264 → RTMP and HEVC → disk simultaneously, both ~5.95 s |
@@ -250,7 +266,7 @@ produces the installer and portable zip on the Releases page. Two test harnesses
 - `tools/smoke-test.ps1` — end-to-end engine checks against real files and pixels (needs an NVIDIA
   GPU; run it locally): record/pause/RTMP/replay/dual output/browser overlay/noise gate/compressor/
   mic monitoring/DirectShow/window capture/cursor toggling on both backends.
-- `tools/ui-test.ps1` — UI click-through automation (33 checks): launches the app against a
+- `tools/ui-test.ps1` — UI click-through automation (36 checks): launches the app against a
   throwaway profile, drives it with synthetic clicks and key events at design coordinates, and
   asserts on pixels and the persisted settings (pages, tab switching, accent swatches, theme repaint
   + persistence, add-source menu open/close, **text editing** — Ctrl+A, typing at the caret,

@@ -94,6 +94,7 @@ target_link_libraries(ulticast-ui PRIVATE
     shell32
     comdlg32
     gdi32
+    winmm
 )
 
 foreach (target ulticast ulticast-ui)

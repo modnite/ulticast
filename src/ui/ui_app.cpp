@@ -19,6 +19,7 @@
 #include <dwrite.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <timeapi.h>  // timeBeginPeriod: accurate live-preview pacing
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -217,6 +218,7 @@ enum {
     ID_TOGGLE_BROWSER,
     ID_OPENLOGS,
     ID_REPORT,
+    ID_COPYLOG,
     ID_BROWSE,
     ID_ITEM_BASE = 1000,
     ID_SCENE_BASE = 2000,
@@ -420,6 +422,7 @@ private:
     float MeasureText(const std::wstring& s, IDWriteTextFormat* fmt);
     // Trim a label to fit a width, with an ellipsis (never clip mid-character).
     std::wstring Ellipsize(const std::wstring& s, float maxW);
+    void SetClipboardText(const std::wstring& text);
     void Panel(const D2D1_RECT_F& r, float radius, const D2D1_COLOR_F& fill, bool border);
     void Button(int id, const D2D1_RECT_F& r, const std::wstring& label, BtnStyle style,
                 bool enabled = true);
@@ -494,6 +497,7 @@ private:
     void CommitPopupItem(int index);
     void DrawFocusRing();
     void RefreshWindowCombo();
+    void UpdateUiTick();   // keep the preview in step with the capture rate
     void OnTrayCommand(int id);
     void InitTray();
     void ShowTrayMenu();
@@ -543,6 +547,14 @@ private:
     int kbdFocus_ = 0;
     bool kbdNav_ = false;  // the ring shows only after the keyboard was used
     int kbdItem_ = 0;      // highlighted popup item while navigating with arrows
+    // Preview pacing: tick fast while a session is live so the preview tracks the
+    // capture rate; Present(1,0) caps it at the display refresh.
+    UINT uiTickMs_ = 66;
+    uint64_t previewFrames_ = 0;
+    uint64_t previewFpsT0_ = 0;
+    double previewFps_ = 0.0;
+    double paintMs_ = 0.0;   // cost of the last full UI paint (diagnostic)
+    bool fastTimer_ = false;  // 1 ms system timer active (live preview pacing)
     std::map<int, D2D1_RECT_F> comboRects_, sliderRects_, fieldRects_;
     std::map<int, std::pair<int, int>> sliderRange_;  // id -> (min, max)
     std::map<int, int*> sliderValue_;                 // id -> bound value
@@ -588,6 +600,14 @@ private:
     bool lastMonitor_ = false;
     bool separateTracks_ = false;
     bool trayBalloonShown_ = false;  // "still running in the tray" notice, once
+    uint64_t browserUrlDirtyMs_ = 0;  // overlay URL edited: reload after typing stops
+    // Dedicated overlay preview (Settings > Browser): the browser's own render,
+    // drawn zero-copy from the engine's shared texture.
+    ComPtr<ID2D1Bitmap1> browserPrevBmp_;
+    ComPtr<ID3D11Texture2D> browserPrevTex_, browserPrevSrc_;
+    uint32_t browserPrevW_ = 0, browserPrevH_ = 0;
+    uint64_t browserPrevVer_ = 0;
+    void RefreshBrowserPreview();
     int settingsCat_ = 0;            // Settings category rail selection
     void MoveSource(int index, int delta);
     std::wstring browserStatus_;  // last "[browser] ..." line (load status)
@@ -1260,23 +1280,26 @@ void UiApp::EditSelectAll() {
     edit_.caret = (int)edit_.text->size();
 }
 
+void UiApp::SetClipboardText(const std::wstring& text) {
+    if (!hwnd_ || !OpenClipboard(hwnd_)) return;
+    EmptyClipboard();
+    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    if (HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
+        if (auto* dst = (wchar_t*)GlobalLock(h)) {
+            memcpy(dst, text.c_str(), text.size() * sizeof(wchar_t));
+            dst[text.size()] = 0;
+            GlobalUnlock(h);
+            SetClipboardData(CF_UNICODETEXT, h);
+        }
+    }
+    CloseClipboard();
+}
+
 void UiApp::EditCopy(bool cut) {
     if (!edit_.text || edit_.anchor == edit_.caret) return;
     const int lo = (std::min)(edit_.anchor, edit_.caret);
     const int hi = (std::max)(edit_.anchor, edit_.caret);
-    if (OpenClipboard(hwnd_)) {
-        EmptyClipboard();
-        const size_t bytes = (size_t)(hi - lo + 1) * sizeof(wchar_t);
-        if (HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
-            if (auto* dst = (wchar_t*)GlobalLock(h)) {
-                memcpy(dst, edit_.text->c_str() + lo, (size_t)(hi - lo) * sizeof(wchar_t));
-                dst[hi - lo] = 0;
-                GlobalUnlock(h);
-                SetClipboardData(CF_UNICODETEXT, h);
-            }
-        }
-        CloseClipboard();
-    }
+    SetClipboardText(edit_.text->substr((size_t)lo, (size_t)(hi - lo)));
     if (cut) {
         edit_.text->erase((size_t)lo, (size_t)(hi - lo));
         edit_.caret = lo;
@@ -1410,6 +1433,9 @@ void UiApp::AfterFieldEdit() {    // Field-specific cleanup, mirroring what a na
         scenes_[activeScene_].name = sceneName_;
         SyncSettingsFromUi();
         SaveUiSettings(settings_);  // renaming a scene persists immediately
+    } else if (focus_ == ID_FIELD_BROWSER) {
+        // Debounced below: the running overlay follows the URL as you type.
+        browserUrlDirtyMs_ = GetTickCount64();
     }
 }
 
@@ -1532,6 +1558,7 @@ void UiApp::Paint() {
     }
 
     dc_->BeginDraw();
+    const auto paintT0 = std::chrono::steady_clock::now();
     dc_->SetTransform(D2D1::Matrix3x2F::Identity());
     dc_->Clear(kBg);
 
@@ -1562,27 +1589,55 @@ void UiApp::Paint() {
         CreateDeviceResources();  // cached brushes/layer/gradient are device-bound
         return;
     }
-    swap_->Present(1, 0);
+    // Present with vsync only when idle. While a session is live the UI ticks at
+    // the capture rate, and a vsync Present can block for a long time if the
+    // window is occluded -- which would stall the message loop (and the preview).
+    // Present with vsync only when idle. While a session is live the preview is
+    // paced by the frame budget below (Present(1,0) can block for a long time if
+    // the window is occluded, which would stall the message loop).
+    swap_->Present(sessionRunning_ ? 0 : 1, 0);
+    paintMs_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - paintT0)
+                   .count();
+
+    // Live preview: self-schedule the next frame at the configured rate instead of
+    // waiting for WM_TIMER (which coalesces with pending paints and lands at about
+    // half the rate). A 1 ms system timer keeps the leftover sleep accurate.
+    if (sessionRunning_ && IsWindowVisible(hwnd_) && !IsIconic(hwnd_)) {
+        if (!fastTimer_) {
+            timeBeginPeriod(1);
+            fastTimer_ = true;
+        }
+        const unsigned fps = std::clamp<unsigned>(settings_.fps, 30u, 120u);
+        const double left = 1000.0 / (double)fps - paintMs_;
+        if (left > 1.0) Sleep((DWORD)(left - 0.5));
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    } else if (fastTimer_) {
+        timeEndPeriod(1);
+        fastTimer_ = false;
+    }
 }
 
 void UiApp::DrawHeader() {
-    dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(Px(30), Px(26)), Px(6), Px(6)), Br(kAccent));
-    Text(L"Ulticast", fmtTitle_, S(46, 0, 190, 52), kText);
+    // Menu bar: identity on the left, the three destinations as flat menu items
+    // (accent underline on the active one), live status on the right.
+    const float barH = 50;
+    dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(Px(28), Px(barH / 2)), Px(6), Px(6)),
+                     Br(kAccent));
+    Text(L"Ulticast", fmtTitle_, S(42, 0, 140, barH), kText);
+    dc_->FillRectangle(S(190, 15, 1, barH - 30), Br(WithAlpha(kBorder, 0.9f)));
 
-    // page tabs
-    auto tab = [&](int id, float x, float w, const wchar_t* label, bool active) {
-        D2D1_RECT_F r = S(x, 13, w, 28);
+    auto item = [&](int id, float x, float w, const wchar_t* label, bool active) {
+        D2D1_RECT_F r = S(x, 9, w, barH - 20);
         hits_.push_back({id, r, true});
-        auto rr = D2D1::RoundedRect(r, Px(7), Px(7));
-        if (active)
-            dc_->FillRoundedRectangle(rr, Br(WithAlpha(kAccent, 0.25f)));
-        else if (hover_ == id)
-            dc_->FillRoundedRectangle(rr, Br(kPanel2));
-        Text(label, fmtBody_, r, active ? kText : kTextDim, DWRITE_TEXT_ALIGNMENT_CENTER);
+        if (hover_ == id && !active)
+            dc_->FillRoundedRectangle(D2D1::RoundedRect(r, Px(6), Px(6)),
+                                      Br(WithAlpha(kPanel2, 0.75f)));
+        Text(label, fmtBody_, Inset(r, 14, 0), active ? kText : WithAlpha(kText, 0.75f));
+        if (active) dc_->FillRectangle(S(x + 14, barH - 13, w - 28, 2), Br(kAccent));
     };
-    tab(ID_TAB_RECORD, 238, 92, L"Record", page_ == 0);
-    tab(ID_TAB_STREAM, 336, 88, L"Stream", page_ == 1);
-    tab(ID_TAB_SETTINGS, 430, 100, L"Settings", page_ == 2);
+    item(ID_TAB_RECORD, 206, 104, L"Record", page_ == 0);
+    item(ID_TAB_STREAM, 314, 100, L"Stream", page_ == 1);
+    item(ID_TAB_SETTINGS, 418, 112, L"Settings", page_ == 2);
 
     std::wstring label;
     D2D1_COLOR_F color;
@@ -1613,9 +1668,10 @@ void UiApp::DrawHeader() {
     }
     float pillW = MeasureText(label, fmtPill_.Get()) + Px(29);
     D2D1_RECT_F pillR =
-        D2D1::RectF(Px(kWinW - 20) - pillW, Px(14), Px(kWinW - 20), Px(14) + Px(24));
+        D2D1::RectF(Px(kWinW - 20) - pillW, Px(13), Px(kWinW - 20), Px(13) + Px(24));
     Pill(pillR, color, label);
-    dc_->FillRectangle(S(0, 51, kWinW, 1), Br(kBorder));}
+    dc_->FillRectangle(S(0, barH, kWinW, 1), Br(kBorder));
+}
 
 D2D1_RECT_F UiApp::PreviewCanvasToDevice(const D2D1_RECT_F& pr, float cx, float cy, float cw,
                                          float ch) const {
@@ -2432,6 +2488,10 @@ void UiApp::DrawPreviewStats(const D2D1_RECT_F& r) {
                                Widen(stats_.backend).c_str());
     if (sessionRunning_ && stats_.width)
         line += Format(L"   ·   %ux%u", stats_.width, stats_.height);
+    if (sessionRunning_ && previewFps_ > 1.0)
+        line += Format(L"   ·   view %.0f fps", previewFps_);
+    if (sessionRunning_ && paintMs_ > 0.1)
+        line += Format(L"   ·   frame %.1f ms", paintMs_);
     line += Format(L"   ·   %llu dropped",
                    (unsigned long long)(sessionRunning_ ? stats_.dropped : 0));
     Text(line, fmtSmall_,
@@ -2609,6 +2669,58 @@ void UiApp::DrawSceneSourcesCard(float x, float y, float w) {
     }
 }
 
+void UiApp::RefreshBrowserPreview() {
+    // Only while the Settings > Browser card is on screen. The engine keeps the
+    // overlay on the GPU (shared texture), so this is a pointer swap + a D2D
+    // wrap: no per-frame CPU copy or upload.
+    if (page_ != 2 || settingsCat_ != 4) return;
+    uint64_t ver = 0;
+    auto tex = session_.BrowserTexture(&ver);
+    if (!tex) {
+        browserPrevBmp_.Reset();
+        browserPrevTex_.Reset();
+        browserPrevSrc_.Reset();
+        browserPrevW_ = browserPrevH_ = 0;
+        return;
+    }
+    // Re-open when the session restarted or the overlay resized.
+    if (tex.Get() != browserPrevSrc_.Get()) {
+        browserPrevBmp_.Reset();
+        browserPrevTex_.Reset();
+        browserPrevW_ = browserPrevH_ = 0;
+        browserPrevSrc_ = tex;
+    }
+    browserPrevVer_ = ver;
+    D3D11_TEXTURE2D_DESC d{};
+    tex->GetDesc(&d);
+    if (browserPrevW_ != d.Width || browserPrevH_ != d.Height) {
+        browserPrevBmp_.Reset();
+        browserPrevTex_.Reset();
+        browserPrevW_ = d.Width;
+        browserPrevH_ = d.Height;
+        ComPtr<IDXGIResource> res;
+        if (SUCCEEDED(tex->QueryInterface(IID_PPV_ARGS(res.GetAddressOf())))) {
+            HANDLE shared = nullptr;
+            if (SUCCEEDED(res->GetSharedHandle(&shared)) && shared) {
+                ComPtr<ID3D11Texture2D> opened;
+                if (SUCCEEDED(d3d_->OpenSharedResource(shared, __uuidof(ID3D11Texture2D),
+                                                       (void**)opened.GetAddressOf())))
+                    browserPrevTex_ = opened;
+            }
+        }
+    }
+    if (browserPrevTex_ && !browserPrevBmp_) {
+        ComPtr<IDXGISurface> surface;
+        if (SUCCEEDED(browserPrevTex_.As(&surface))) {
+            D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
+                D2D1_BITMAP_OPTIONS_NONE,
+                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+            dc_->CreateBitmapFromDxgiSurface(surface.Get(), &props,
+                                             browserPrevBmp_.GetAddressOf());
+        }
+    }
+}
+
 void UiApp::DrawSettingsPage() {
     const float rowH = 32, rowGap = 5, cardGap = 12, pad = 10, headH = 18;
     auto cardH = [&](float rows) {
@@ -2618,6 +2730,7 @@ void UiApp::DrawSettingsPage() {
                                      L"Appearance", L"Browser",      L"Behavior",
                                      L"Encoding", L"Help",         L"About"};
     constexpr int catCount = 9;
+    RefreshBrowserPreview();  // no-op unless the Browser card is on screen
 
     // ---- category rail: one section at a time instead of a wall of cards
     {
@@ -2783,7 +2896,8 @@ void UiApp::DrawSettingsPage() {
                 break;
             }
             case 4: {  // ---------------------------------------------- Browser
-                Card(x, cy, w, cardH(3), L"BROWSER OVERLAY");
+                const float pvH = 260;
+                Card(x, cy, w, cardH(4) + pvH + rowGap, L"BROWSER OVERLAY");
                 y = cy + pad + headH + 4;
                 Field(ID_FIELD_BROWSER, S(x + pad, y, cw, rowH), &browserText_, false,
                       L"HTML file or https:// URL (alerts, chat, widgets)");
@@ -2800,8 +2914,39 @@ void UiApp::DrawSettingsPage() {
                                                                   : WithAlpha(kTextDim, 0.75f));
                 dc_->PopAxisAlignedClip();
                 y += rowH + rowGap;
+                Text(SceneUsesBrowser()
+                         ? L"Live: the overlay reloads a moment after you stop typing."
+                         : L"No Browser source in this scene — press Test overlay to add one.",
+                     fmtSmall_, S(x + pad, y, cw, rowH),
+                     SceneUsesBrowser() ? WithAlpha(kText, 0.85f) : WithAlpha(kTextDim, 0.75f));
+                y += rowH + rowGap;
                 Text(L"Twitch chat: https://www.twitch.tv/embed/<channel>/chat?parent=localhost",
                      fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
+                y += rowH + rowGap;
+
+                // Dedicated overlay preview: the browser's own render (what the
+                // source composites), independent of the scene preview.
+                D2D1_RECT_F pv = S(x + pad, y, cw, pvH);
+                Panel(pv, 10, kPanel2, true);
+                if (browserPrevBmp_ && browserPrevW_ && browserPrevH_) {
+                    const float sc =
+                        (std::min)((pv.right - pv.left - Px(2)) / (float)browserPrevW_,
+                                   (pv.bottom - pv.top - Px(2)) / (float)browserPrevH_);
+                    const float dw = browserPrevW_ * sc, dh = browserPrevH_ * sc;
+                    D2D1_RECT_F dst = D2D1::RectF((pv.left + pv.right) / 2 - dw / 2,
+                                                  (pv.top + pv.bottom) / 2 - dh / 2,
+                                                  (pv.left + pv.right) / 2 + dw / 2,
+                                                  (pv.top + pv.bottom) / 2 + dh / 2);
+                    dc_->PushAxisAlignedClip(pv, D2D1_ANTIALIAS_MODE_ALIASED);
+                    dc_->DrawBitmap(browserPrevBmp_.Get(), dst, 1.0f,
+                                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                    dc_->PopAxisAlignedClip();
+                } else {
+                    Text(SceneUsesBrowser() ? L"Waiting for the overlay to paint…"
+                                            : L"No Browser source yet — press Test overlay",
+                         fmtSmall_, pv, WithAlpha(kTextDim, 0.8f),
+                         DWRITE_TEXT_ALIGNMENT_CENTER);
+                }
                 break;
             }
             case 5: {  // ---------------------------------------------- Behavior
@@ -2921,13 +3066,14 @@ void UiApp::DrawSettingsPage() {
 
                 Card(x, cy, w, cardH(3), L"TROUBLESHOOTING");
                 y = cy + pad + headH + 4;
-                Button(ID_OPENLOGS, S(x + pad, y, 150, rowH), L"Open Logs", BtnStyle::Ghost);
+                Button(ID_COPYLOG, S(x + pad, y, 150, rowH), L"Copy Log", BtnStyle::Primary);
                 Button(ID_REPORT, S(x + pad + 158, y, 150, rowH), L"Report Bug",
                        BtnStyle::Ghost);
-                Button(ID_OPENFOLDER, S(x + pad + 316, y, 154, rowH), L"Open Folder",
+                Button(ID_OPENLOGS, S(x + pad + 316, y, 154, rowH), L"Open Logs",
                        BtnStyle::Ghost);
                 y += rowH + rowGap;
-                Text(L"Logs live in %LOCALAPPDATA%\\Ulticast\\logs (the newest 20 are kept).",
+                Text(L"Copy Log puts the last 200 log lines on the clipboard — one click to send "
+                     L"me what happened.",
                      fmtSmall_, S(x + pad, y, cw, rowH), WithAlpha(kTextDim, 0.7f));
                 y += rowH + rowGap;
                 Text(L"Report Bug writes a redacted system report and opens the issue form.",
@@ -3162,6 +3308,18 @@ void UiApp::RefreshPreview() {
         }
     }
     if (previewTex_ && (!previewBmp_ || v != previewVer_)) {
+        if (v != previewVer_) {
+            // Measure the rate the preview is actually presented at.
+            ++previewFrames_;
+            const uint64_t now = GetTickCount64();
+            if (!previewFpsT0_) {
+                previewFpsT0_ = now;
+            } else if (now - previewFpsT0_ >= 1000) {
+                previewFps_ = previewFrames_ * 1000.0 / (double)(now - previewFpsT0_);
+                previewFrames_ = 0;
+                previewFpsT0_ = now;
+            }
+        }
         if (!previewBmp_) {
             ComPtr<IDXGISurface> surface;
             if (SUCCEEDED(previewTex_.As(&surface))) {
@@ -3879,6 +4037,39 @@ void UiApp::ActivateControl(int id) {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
+void UiApp::UpdateUiTick() {
+    // The idle cadence. While a session is live the paint self-schedules (see
+    // Paint): WM_TIMER coalesces with pending paints and lands at roughly half
+    // the requested rate, which made the preview look choppy next to the
+    // capture counter.
+    if (uiTickMs_ != 66) {
+        uiTickMs_ = 66;
+        SetTimer(hwnd_, kTimerId, 66, nullptr);
+    }
+
+    // Live overlay URL: a moment after typing stops, point the running browser at
+    // the new address (navigating beats a Stop/Start cycle).
+    if (browserUrlDirtyMs_ && GetTickCount64() - browserUrlDirtyMs_ > 700) {
+        browserUrlDirtyMs_ = 0;
+        SyncSettingsFromUi();
+        SaveUiSettings(settings_);
+        if (!settings_.browserUrl.empty()) {
+            if (sessionRunning_) {
+                session_.SetBrowserUrl(settings_.browserUrl);
+                statusText_ = L"Overlay loading…";
+                statusError_ = false;
+            } else if (SceneUsesBrowser()) {
+                RestartPreview();  // bring the overlay up so the URL is visible
+                statusText_ = L"Overlay loading…";
+                statusError_ = false;
+            } else {
+                statusText_ = L"No Browser source in this scene — press Test overlay";
+                statusError_ = false;
+            }
+        }
+    }
+}
+
 void UiApp::DrawFocusRing() {
     if (!kbdNav_ || !kbdFocus_) return;
     D2D1_RECT_F r{};
@@ -4098,6 +4289,21 @@ void UiApp::OnAction(int id) {
             ShellExecuteW(nullptr, L"open", Widen(Diag::LogDir()).c_str(), nullptr, nullptr,
                           SW_SHOWNORMAL);
             break;
+        case ID_COPYLOG: {
+            // One click: the log tail on the clipboard, ready to paste into a chat.
+            std::wstring text = Format(L"Ulticast %hs log tail (last 200 lines)\n\n", ULTI_VERSION);
+            const std::wstring tail = Widen(Diag::LogTail(200));
+            if (tail.empty() || tail.find(L"(logging not started)") != std::wstring::npos) {
+                statusText_ = L"No log to copy yet";
+                statusError_ = true;
+                break;
+            }
+            text += tail;
+            SetClipboardText(text);
+            statusText_ = L"Log copied to the clipboard — paste it anywhere";
+            statusError_ = false;
+            break;
+        }
         case ID_REPORT: {
             // Collect a redacted report and hand the user the issue page.
             std::string report = Diag::BuildReport();
@@ -4367,7 +4573,10 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_TIMER:
-            if (wp == kTimerId) InvalidateRect(hwnd, nullptr, FALSE);
+            if (wp == kTimerId) {
+                UpdateUiTick();
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
             return 0;
         case WM_MOUSEMOVE: {
             float x = (float)GET_X_LPARAM(lp), y = (float)GET_Y_LPARAM(lp);
@@ -4563,9 +4772,16 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_LBUTTONUP: {
             float x = (float)GET_X_LPARAM(lp), y = (float)GET_Y_LPARAM(lp);
+            const bool wasDraggingSlider = dragging_ != 0;
             dragging_ = 0;
             if (draggingWebcam_) {
                 draggingWebcam_ = false;
+                SyncSettingsFromUi();
+                SaveUiSettings(settings_);
+            }
+            if (wasDraggingSlider) {
+                // A drag only updated memory: persist it now, so a slider change
+                // survives closing the app without touching anything else.
                 SyncSettingsFromUi();
                 SaveUiSettings(settings_);
             }

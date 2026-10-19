@@ -1140,27 +1140,32 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
                     bd.ArraySize = 1;
                     bd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
                     bd.SampleDesc = {1, 0};
-                    bd.Usage = D3D11_USAGE_DYNAMIC;
+                    // Default usage + shared so the UI can draw the overlay without a
+                    // 9 MB CPU upload per frame (the Settings overlay preview).
+                    bd.Usage = D3D11_USAGE_DEFAULT;
                     bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-                    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-                    browserTex_.Reset();
+                    bd.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+                    ComPtr<ID3D11Texture2D> made;
                     if (SUCCEEDED(d3d_.device->CreateTexture2D(&bd, nullptr,
-                                                               browserTex_.GetAddressOf()))) {
-                        browserSrv_ = Compositor::CreateSrv(d3d_.device.Get(), browserTex_.Get());
+                                                               made.GetAddressOf()))) {
+                        browserSrv_ = Compositor::CreateSrv(d3d_.device.Get(), made.Get());
+                        std::lock_guard<std::mutex> lk(browserTexMu_);
+                        browserTex_ = made;
                     }
                 }
-                if (browserTex_) {
-                    D3D11_MAPPED_SUBRESOURCE map{};
-                    if (SUCCEEDED(d3d_.context->Map(browserTex_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
-                                                    &map))) {
-                        const size_t rowBytes = (size_t)bw * 4;
-                        for (uint32_t y = 0; y < bh; ++y)
-                            memcpy((uint8_t*)map.pData + (size_t)y * map.RowPitch,
-                                   frame.data() + (size_t)y * rowBytes, rowBytes);
-                        d3d_.context->Unmap(browserTex_.Get(), 0);
-                    }
+                ComPtr<ID3D11Texture2D> tex;
+                {
+                    std::lock_guard<std::mutex> lk(browserTexMu_);
+                    tex = browserTex_;
                 }
-                browserFrameNo_ = bno;
+                if (tex) {
+                    // UpdateSubresource stages internally: no per-row CPU mapping.
+                    d3d_.context->UpdateSubresource(tex.Get(), 0, nullptr, frame.data(), bw * 4, 0);
+                }
+                {
+                    std::lock_guard<std::mutex> lk(browserTexMu_);
+                    browserFrameNo_ = bno;
+                }
             }
             if (browserSrv_ && browserW_ > 0) {
                 const float w = (float)(s.w > 0 ? s.w : (int)canvasW);
@@ -1219,9 +1224,11 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
 
     compositor_.Render(rtv_.Get(), layers, layerCount);
 
-    // ---- preview (shared with the UI, ~20 fps) ----
+    // ---- preview (shared with the UI) ----
+    // Copy every frame: this is a GPU-side copy, and skipping frames is what made
+    // the on-screen preview run at a third of the capture rate.
     uint64_t seen = framesSeen_.fetch_add(1);
-    if (previewTex_ && (seen % 3) == 0) {
+    if (previewTex_) {
         d3d_.context->CopyResource(previewTex_.Get(), tex_.Get());
         previewVersion_.fetch_add(1);
     }
@@ -1442,6 +1449,12 @@ bool Session::UploadCursorTexture() {
 Microsoft::WRL::ComPtr<ID3D11Texture2D> Session::PreviewTexture() const {
     std::lock_guard<std::mutex> lock(previewMu_);
     return previewTex_;
+}
+
+Microsoft::WRL::ComPtr<ID3D11Texture2D> Session::BrowserTexture(uint64_t* frameNo) const {
+    std::lock_guard<std::mutex> lock(browserTexMu_);
+    if (frameNo) *frameNo = browserFrameNo_;
+    return browserTex_;
 }
 
 Session::Stats Session::GetStats() const {    Stats st;

@@ -48,8 +48,15 @@ std::wstring ExeDir() {
 
 std::string NormalizeUrl(const std::string& in) {
     if (in.rfind("http://", 0) == 0 || in.rfind("https://", 0) == 0 ||
-        in.rfind("file://", 0) == 0 || in.rfind("data:", 0) == 0)
+        in.rfind("file://", 0) == 0 || in.rfind("data:", 0) == 0 ||
+        in.rfind("about:", 0) == 0)
         return in;
+    // A bare host ("example.com", "localhost:8080/x") is a web address, not a
+    // file: typing a domain should not end up as file://example.com.
+    const bool looksLikeHost = in.find(' ') == std::string::npos &&
+                               in.find(':') != 1 &&  // not a drive letter
+                               in.find('.') != std::string::npos;
+    if (looksLikeHost) return "https://" + in;
     std::string path = in;
     for (auto& c : path)
         if (c == '\\') c = '/';
@@ -266,6 +273,17 @@ bool BrowserOverlay::Start(const std::string& url, int width, int height, std::s
 
     started_ = true;
     return true;
+}
+
+void BrowserOverlay::LoadUrl(const std::string& url) {
+    // CEF frame methods must run on its own UI thread; calling LoadURL from the
+    // app thread can block it and freeze the UI. Restarting the overlay is the
+    // safe path (and it is what the preview restart already does).
+    if (!started_.load()) return;
+    Stop();
+    std::string err;
+    Start(url, (int)width_, (int)height_, &err);
+    ReportStatus("loading " + url);
 }
 
 void BrowserOverlay::Reload() {

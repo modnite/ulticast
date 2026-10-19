@@ -165,6 +165,15 @@ public:
     void SetCursorVisible(bool on);
     // Force the browser overlay to reload (no-op when it is not running).
     void ReloadBrowser() { browser_.Reload(); }
+    // Point the running overlay at a new URL without restarting the session.
+    void SetBrowserUrl(const std::string& url) { browser_.LoadUrl(url); }
+    // Latest overlay frame (packed BGRA) for the Settings overlay preview.
+    bool BrowserFrame(std::vector<uint8_t>* out, uint32_t* w, uint32_t* h, uint64_t* ver) {
+        return browserOn_ && browser_.GetLatest(out, w, h, ver);
+    }
+    // The overlay's GPU texture (shared) + frame counter: the UI draws it
+    // zero-copy, instead of uploading a 9 MB CPU buffer per frame.
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> BrowserTexture(uint64_t* frameNo) const;
     // Mute/unmute the audio sources at runtime (scene audio sources).
     void SetAudioSourcesLive(bool desktop, bool mic) { mixer_.SetLiveSources(desktop, mic); }
     // Mic noise gate (threshold in dBFS); safe to call while running.
@@ -259,6 +268,7 @@ private:
     std::chrono::steady_clock::time_point transitionStart_{};
     std::thread supervisor_;
     mutable std::mutex previewMu_;
+    mutable std::mutex browserTexMu_;  // guards the overlay texture handoff to the UI
 
     mutable std::mutex errMu_;
     mutable std::string failErr_;

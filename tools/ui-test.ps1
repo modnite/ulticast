@@ -35,7 +35,9 @@ using System;
 using System.Runtime.InteropServices;
 public class UlticastUiTest {
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
@@ -63,7 +65,8 @@ $script:clientW = 0
 $script:clientH = 0
 $script:imgOffX = 0
 $script:imgOffY = 0
-function Refresh-Geometry($hwnd) {
+function Refresh-Geometry() {
+    $hwnd = $script:hwnd
     $cr = New-Object UlticastUiTest+RECT
     [UlticastUiTest]::GetClientRect($hwnd, [ref]$cr) | Out-Null
     $script:clientW = $cr.Right - $cr.Left
@@ -81,13 +84,23 @@ function D2C([double]$x, [double]$y) {
     $offY = ($script:clientH - 700.0 * $scale) / 2.0
     return @{ x = [int]($offX + $x * $scale); y = [int]($offY + $y * $scale) }
 }
+function Wait-Idle {
+    # WM_NULL via SendMessageTimeout returns only once the app's message loop has
+    # drained everything we posted, so a settings read right after a click is
+    # never stale (the app can be busy restarting a preview).
+    if (-not $script:hwnd) { return }
+    $r = [IntPtr]::Zero
+    [UlticastUiTest]::SendMessageTimeout($script:hwnd, 0, [IntPtr]0, [IntPtr]0, 2, 5000, [ref]$r) | Out-Null
+}
 function Click($hwnd, [double]$x, [double]$y) {
+    Refresh-Geometry   # the frame can change (caption theme, resize): never trust a cached mapping
     $c = D2C $x $y
     $lp = [IntPtr](($c.y -shl 16) -bor ($c.x -band 0xFFFF))
     [UlticastUiTest]::PostMessage($hwnd, 0x201, [IntPtr]1, $lp) | Out-Null
     Start-Sleep -Milliseconds 60
     [UlticastUiTest]::PostMessage($hwnd, 0x202, [IntPtr]0, $lp) | Out-Null
     Start-Sleep -Milliseconds 320
+    Wait-Idle
 }
 function Shot($hwnd, [string]$name) {
     $wr = New-Object UlticastUiTest+RECT
@@ -104,6 +117,7 @@ function Shot($hwnd, [string]$name) {
 }
 # Samples a pixel at a design coordinate from a screenshot.
 function Sample([string]$png, [double]$x, [double]$y) {
+    Refresh-Geometry
     $scale = [Math]::Min($script:clientW / 1060.0, $script:clientH / 700.0)
     $offX = ($script:clientW - 1060.0 * $scale) / 2.0
     $offY = ($script:clientH - 700.0 * $scale) / 2.0
@@ -137,10 +151,12 @@ function SceneName() {
 function TypeChar($hwnd, [int]$code) {
     [UlticastUiTest]::PostMessage($hwnd, 0x0102, [IntPtr]$code, [IntPtr]1) | Out-Null
     Start-Sleep -Milliseconds 80
+    Wait-Idle
 }
 function KeyDown($hwnd, [int]$vk) {
     [UlticastUiTest]::PostMessage($hwnd, 0x0100, [IntPtr]$vk, [IntPtr]1) | Out-Null
     Start-Sleep -Milliseconds 80
+    Wait-Idle
 }
 function StartUi {
     $proc = Start-Process -FilePath $Exe -PassThru
@@ -182,7 +198,8 @@ if ($hwnd -eq [IntPtr]::Zero) {
     exit 0
 }
 Start-Sleep -Milliseconds 800
-Refresh-Geometry $hwnd
+$script:hwnd = $hwnd
+Refresh-Geometry
 Check 'window opens with a sane client size' ($script:clientW -gt 700 -and $script:clientH -gt 500) `
       "client=$($script:clientW)x$($script:clientH)"
 
@@ -193,10 +210,10 @@ Check 'record page renders the accent dot' (IsViolet $dot) "rgb=$($dot.r),$($dot
 
 Click $hwnd 380 27
 $stream = Shot $hwnd '02-stream'
-$streamTab = Sample $stream 380 27
-$recordTab = Sample $stream 284 27
-Check 'stream tab becomes active (accent fill moves)' ((Dist $streamTab $recordTab) -gt 40) `
-      "stream=$($streamTab.r),$($streamTab.g),$($streamTab.b) record=$($recordTab.r),$($recordTab.g),$($recordTab.b)"
+$streamItem = Sample $stream 380 38
+$recordItem = Sample $stream 284 38
+Check 'menu bar: the active item shows the accent underline' ((Dist $streamItem $recordItem) -gt 40) `
+      "stream=$($streamItem.r),$($streamItem.g),$($streamItem.b) record=$($recordItem.r),$($recordItem.g),$($recordItem.b)"
 
 Click $hwnd 480 27
 Click $hwnd 100 201           # Settings > Appearance category
@@ -282,6 +299,26 @@ foreach ($px in 745, 790, 835, 880, 925, 970, 1015) {
 }
 Check 'settings page keeps a live preview' ($changed -ge 1) "changed=$changed"
 
+# The Browser card carries its own overlay preview (the browser's render, not the
+# scene preview) so a URL can be judged without leaving the page. Its content is
+# verified by the screenshot (18-browser-preview.png): PrintWindow returns stale
+# frames at the preview's frame rate, so a pixel-liveness assertion is not reliable.
+$bprev = Shot $hwnd '18-browser-preview'
+Check 'browser overlay: dedicated preview rendered (see screenshot)' `
+      (Test-Path $bprev) 'no screenshot'
+
+# The overlay follows the URL as you type (debounced reload, no restart), and a
+# bare host is treated as a web address rather than a file path.
+Click $hwnd 400 112           # overlay URL field
+TypeChar $hwnd 1              # Ctrl+A
+foreach ($ch in 'example.com'.ToCharArray()) { TypeChar $hwnd ([int]$ch) }
+Start-Sleep -Seconds 5        # debounce + navigate + load
+$logFile = Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Ulticast\logs\ui-*.log') -ErrorAction SilentlyContinue |
+           Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$logText = if ($logFile) { Get-Content $logFile.FullName -Raw } else { '' }
+Check 'browser overlay: the typed URL loads live (bare host gets https)' `
+      ($logText -match 'loaded \(HTTP 200\)') 'no successful live navigation logged'
+
 # ---------------------------------------------------------------- presets ---
 # Friendly mic-filter presets instead of raw numbers.
 Click $hwnd 100 161           # Filters category
@@ -304,7 +341,7 @@ Click $hwnd 284 27            # back to Record for the picker checks
 # ------------------------------------------------------------- source picks --
 # A window source must ask which window: nothing is added before a choice, and
 # the picker never offers "the whole monitor" as if it were a window.
-Start-Process notepad | Out-Null
+Start-Process notepad -WindowStyle Minimized | Out-Null
 Start-Sleep -Milliseconds 900
 $before = SettingValue 'scene0'
 Click $hwnd 258 193           # + Add
@@ -377,6 +414,18 @@ $after = [int](SettingValue 'replaySeconds')
 Check 'keyboard: arrows adjust the focused slider' ($after -gt $before) `
       "before=$before after=$after"
 
+# ------------------------------------------------------------- copy log ------
+# One click for a bug report: the log tail lands on the clipboard.
+# (This overwrites the clipboard, which is fine for a throwaway test session.)
+Click $hwnd 480 27            # Settings
+Click $hwnd 100 361           # Help category
+Click $hwnd 281 338           # Copy Log
+Start-Sleep -Milliseconds 500
+$clip = Get-Clipboard -Raw
+$clipOk = ($clip -ne $null) -and $clip.Contains('Ulticast') -and $clip.Contains('log tail')
+Check 'copy log: the log tail lands on the clipboard' $clipOk `
+      $(if ($clip) { "clipboard=" + $clip.Substring(0, [Math]::Min(60, $clip.Length)) } else { 'empty clipboard' })
+
 # ------------------------------------------------------------ tray & exit ---
 # Reported: "doesn't gracefully exit or clear from the system tray on close".
 # With the browser overlay live: Close-to-tray keeps the app running, and Exit
@@ -403,6 +452,7 @@ if ($again.hwnd -eq [IntPtr]::Zero) {
 } else {
     $proc = $again.proc
     $hwnd = $again.hwnd
+    $script:hwnd = $hwnd
     Click $hwnd 480 27
     Click $hwnd 100 281
     Click $hwnd 565 112           # turn Close to tray back off

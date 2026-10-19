@@ -33,6 +33,9 @@ public:
     void Stop();
     // Force a reload (useful when a page failed to load or needs refreshing).
     void Reload();
+    // Load a different URL in the running browser (no restart): used by the
+    // Settings overlay field so the preview follows what is being typed.
+    void LoadUrl(const std::string& url);
 
     // Latest painted frame (packed BGRA, top-left origin). frameNo increments
     // when a new frame is available.

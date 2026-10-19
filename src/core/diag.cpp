@@ -78,22 +78,6 @@ std::string RedactedSettings() {
     return out;
 }
 
-std::string LogTail(size_t maxLines) {
-    std::lock_guard<std::mutex> lock(g_mu);
-    if (g_logPath.empty()) return "(logging not started)";
-    std::ifstream f(g_logPath);
-    if (!f) return "(cannot read log)";
-    std::vector<std::string> lines;
-    std::string line;
-    while (std::getline(f, line)) {
-        lines.push_back(line);
-        if (lines.size() > maxLines) lines.erase(lines.begin());
-    }
-    std::string out;
-    for (auto& l : lines) out += "  " + l + "\n";
-    return out;
-}
-
 }  // namespace
 
 namespace Diag {
@@ -151,6 +135,22 @@ void Log(const char* fmt, ...) {
         g_file << Timestamp(false) << "  " << buf << "\n";
         g_file.flush();
     }
+}
+
+std::string LogTail(size_t maxLines) {
+    std::lock_guard<std::mutex> lock(g_mu);
+    if (g_logPath.empty()) return "(logging not started)";
+    std::ifstream f(g_logPath);
+    if (!f) return "(cannot read log)";
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(f, line)) {
+        lines.push_back(line);
+        if (lines.size() > maxLines) lines.erase(lines.begin());
+    }
+    std::string out;
+    for (auto& l : lines) out += "  " + l + "\n";
+    return out;
 }
 
 std::string BuildReport() {

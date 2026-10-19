@@ -21,4 +21,8 @@ std::string DataDir();  // %LOCALAPPDATA%\Ulticast
 // Safe to show to strangers: the stream key is never included.
 std::string BuildReport();
 
+// The last |maxLines| lines of this run's log (indented), for pasting into a
+// chat or issue when a full report is overkill.
+std::string LogTail(size_t maxLines);
+
 }  // namespace Diag

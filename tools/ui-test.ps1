@@ -258,24 +258,24 @@ Check 'picking violet restores the default accent' (IsViolet $dotBack) `
       "rgb=$($dotBack.r),$($dotBack.g),$($dotBack.b)"
 
 # ---------------------------------------------------------------- popups ----
-# One scene: the "+ Add" button sits at y=181..205 and the source rows start at 212.
+# One scene: the "+ Add" button is in the rail lower band (y 479..503).
 Click $hwnd 284 27
 $before = Shot $hwnd '06-record-again'
-Click $hwnd 258 193
+Click $hwnd 258 491
 $open = Shot $hwnd '07-add-menu-open'
-$menu = Sample $open 150 230
-$bg = Sample $before 150 230
+$menu = Sample $open 150 340
+$bg = Sample $before 150 340
 Check 'add-source menu opens' ((Dist $menu $bg) -gt 25) "menu=$($menu.r),$($menu.g),$($menu.b)"
 Click $hwnd 600 30
 $closed = Shot $hwnd '08-add-menu-closed'
-$after = Sample $closed 150 230
+$after = Sample $closed 150 340
 Check 'clicking away closes the menu' ((Dist $after $bg) -le 12) "after=$($after.r),$($after.g),$($after.b)"
 
 # ---------------------------------------------------------------- text edit --
 # The scene-name field must behave like a normal edit control: caret placement
 # on click, Ctrl+A, typing at the caret, backspace at the caret.
 Click $hwnd 284 27            # Record page
-Click $hwnd 120 147           # scene name field (design y = 130..164)
+Click $hwnd 120 451           # scene name field (lower band, under the preview)
 TypeChar $hwnd 1              # Ctrl+A
 TypeChar $hwnd 0x5A           # Z
 TypeChar $hwnd 0x5A           # Z
@@ -283,7 +283,7 @@ Check 'text field: Ctrl+A + typing replaces the text' ((SceneName) -eq 'ZZ') `
       "name=$(SceneName)"
 KeyDown $hwnd 0x08            # backspace at the end
 Check 'text field: backspace deletes at the caret' ((SceneName) -eq 'Z') "name=$(SceneName)"
-Click $hwnd 72 147            # click near the left edge -> caret at position 0
+Click $hwnd 72 451            # click near the left edge -> caret at position 0
 TypeChar $hwnd 0x41           # A
 Check 'text field: caret placement from the click' ((SceneName) -eq 'AZ') "name=$(SceneName)"
 TypeChar $hwnd 1              # Ctrl+A
@@ -365,14 +365,14 @@ Click $hwnd 284 27            # back to Record for the picker checks
 Start-Process notepad -WindowStyle Minimized | Out-Null
 Start-Sleep -Milliseconds 900
 $before = SettingValue 'scene0'
-Click $hwnd 258 193           # + Add
-Click $hwnd 258 264           # "Window Capture"
+Click $hwnd 258 491           # + Add
+Click $hwnd 258 278           # "Window Capture" (the long menu flips upward)
 Start-Sleep -Milliseconds 500
 $pending = SettingValue 'scene0'
 Check 'window source: nothing added before a window is chosen' ($pending -eq $before) `
       "before=$before after=$pending"
 Shot $hwnd '13-window-picker' | Out-Null
-Click $hwnd 258 230           # first window in the picker
+Click $hwnd 258 244           # first window in the picker (also flipped up)
 Start-Sleep -Milliseconds 700
 $after = SettingValue 'scene0'
 Check 'window source: choosing a window adds a WIN source' `
@@ -386,7 +386,7 @@ Start-Sleep -Milliseconds 250
 $hotkeyOpen = Shot $hwnd '14-hotkey-picker'
 Check 'clip hotkey picker opens' ((Dist (Sample $hotkeyOpen 895 300) (Sample $hotkeyOpen 895 600)) -gt 20) `
       'no picker drawn'
-Click $hwnd 895 339           # F10 (items run bottom-up from the combo)
+Click $hwnd 895 349           # F10 (items run bottom-up from the combo)
 $hotkey = SettingValue 'hotkey'
 Check 'clip hotkey picker persists F10' ($hotkey -eq '121') "hotkey=$hotkey"
 
@@ -460,15 +460,15 @@ function SceneField([string]$key, [int]$srcType, [int]$field) {
     return $null
 }
 Click $hwnd 284 27            # Record page
-Click $hwnd 680 200           # click a layer on the preview
-Drag $hwnd 680 200 560 160    # drag it up-left
 $movedLayer = $false
-$freeBefore = $true
-foreach ($src in (SettingValue 'scene0').Split(';')) {
-    $f = $src.Split(':')
-    if ($f.Count -gt 8 -and $f[0] -ne '0') {
-        if ([double]$f[7] -ge 0) { $movedLayer = $true }
+foreach ($pt in @(@(700, 300), @(530, 212))) {   # the window PiP, then the middle
+    Click $hwnd $pt[0] $pt[1]
+    Drag $hwnd $pt[0] $pt[1] ($pt[0] - 90) ($pt[1] - 60)
+    foreach ($src in (SettingValue 'scene0').Split(';')) {
+        $f = $src.Split(':')
+        if ($f.Count -gt 8 -and $f[0] -ne '0' -and [double]$f[7] -ge 0) { $movedLayer = $true }
     }
+    if ($movedLayer) { break }
 }
 Check 'preview: dragging a layer moves it' $movedLayer 'no layer picked up a free position'
 Shot $hwnd '22-layer-selected' | Out-Null
@@ -476,7 +476,7 @@ Shot $hwnd '22-layer-selected' | Out-Null
 # ------------------------------------------------------------- pop-out ------
 # The preview detaches into its own resizable window and closes cleanly.
 Add-Type -MemberDefinition '[DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr FindWindow(string cls, string win);' -Name PopOut -Namespace UlticastUi
-Click $hwnd 372 87            # pop-out button (next to the fullscreen button)
+Click $hwnd 75 85             # pop-out button (next to the fullscreen button)
 Start-Sleep -Milliseconds 1500
 $pop = [UlticastUi.PopOut]::FindWindow("UlticastPreviewWindow", $null)
 Check 'pop-out preview: opens its own window' ($pop -ne [IntPtr]::Zero) 'no preview window'

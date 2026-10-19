@@ -152,6 +152,11 @@ Please attach `diagnostics-*.txt` and the newest log to
   tighter 30 px rows, a status block in the rail instead of an empty activity box, redundant hint
   lines removed, a page backdrop behind the overlay preview. Also fixed: the Settings card stretch
   repainted its own contents (that was the "transparent" look) — released in v0.9.9
+- **Stage 21** ordering and click fixes plus the layout: **any source can be reordered** (only the base
+  capture stays first), **scenes are reorderable** (chevrons on each scene row), clicking a source row a
+  second time **closes** its list instead of reopening it, the status chip and the preview's recording
+  dot are gone, and the **preview now inhabits the top band** (full content width) with the scene rail
+  and the cards below it — released in v0.9.10
 - Next: on-hardware validation on the RTX 3080 rig
 
 ## The UI (Ulticast-ui.exe)

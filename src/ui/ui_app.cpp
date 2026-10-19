@@ -255,6 +255,8 @@ enum {
     ID_TOGGLE_STREAMLOOKAHEAD,
     ID_TOGGLE_STREAMMULTIPASS,
     ID_SRC_UP_BASE = 4300,    // + source index: move up in the list (z-order)
+    ID_SCENE_UP_BASE = 4400,  // + scene index: reorder scenes
+    ID_SCENE_DOWN_BASE = 4500,
     ID_SRC_DOWN_BASE = 4400,  // + source index: move down
 };
 
@@ -412,7 +414,9 @@ private:
     void ApplyThemeNow();  // palette + gradient + caption + repaint
     void Card(float x, float y, float w, float h, const std::wstring& title);
     void DrawSceneSourcesCard(float x, float y, float w);  // Settings: see/choose every source target
-    D2D1_RECT_F PreviewRect() const { return S(320, 64, 720, 286); }
+    // Preview inhabits the top band, full content width; the scene rail and the
+    // cards live below it.
+    D2D1_RECT_F PreviewRect() const { return S(20, 62, 1020, 300); }
     // preview <-> canvas mapping for the draggable webcam PiP
     D2D1_RECT_F PreviewCanvasToDevice(const D2D1_RECT_F& pr, float cx, float cy, float cw,
                                       float ch) const;
@@ -640,6 +644,7 @@ private:
     void RefreshBrowserPreview();
     int settingsCat_ = 0;            // Settings category rail selection
     void MoveSource(int index, int delta);
+    void MoveScene(int index, int delta);
     std::wstring browserStatus_;  // last "[browser] ..." line (load status)
     void EnsureBrowserSource();
     std::wstring keyText_, urlText_, chromaText_, browserText_;
@@ -1694,37 +1699,6 @@ void UiApp::DrawHeader() {
     item(ID_TAB_STREAM, 314, 100, L"Stream", page_ == 1);
     item(ID_TAB_SETTINGS, 418, 112, L"Settings", page_ == 2);
 
-    std::wstring label;
-    D2D1_COLOR_F color;
-    if (stats_.failed) {
-        label = L"ERROR";
-        color = kRec;
-    } else if (!sessionRunning_) {
-        label = L"IDLE";
-        color = kTextDim;
-    } else if (stats_.recording && stats_.streaming) {
-        label = L"REC + LIVE";
-        color = kRec;
-    } else if (stats_.recording) {
-        label = L"RECORDING";
-        color = kRec;
-    } else if (stats_.streaming) {
-        label = L"LIVE";
-        color = kAccent2;
-    } else if (stats_.replayArmed) {
-        label = L"REPLAY";
-        color = kAccent;
-    } else if (previewSession_) {
-        label = L"PREVIEW";
-        color = kAccent;
-    } else {
-        label = L"IDLE";
-        color = kTextDim;
-    }
-    float pillW = MeasureText(label, fmtPill_.Get()) + Px(29);
-    D2D1_RECT_F pillR =
-        D2D1::RectF(Px(kWinW - 20) - pillW, Px(13), Px(kWinW - 20), Px(13) + Px(24));
-    Pill(pillR, color, label);
     dc_->FillRectangle(S(0, barH, kWinW, 1), Br(kBorder));
 }
 
@@ -1872,27 +1846,18 @@ void UiApp::DrawPreview(const D2D1_RECT_F& r) {
     }
 
     if (sessionRunning_ && !stats_.paused) {
-        if (previewSession_) {
-            dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(r.left + Px(20), r.top + Px(20)), Px(6),
-                                           Px(6)),
-                             Br(WithAlpha(kAccent, 0.85f)));
-        } else {
-            float pulse = 0.55f + 0.45f * (float)sin(GetTickCount64() / 320.0);
-            D2D1_COLOR_F dot = WithAlpha(settings_.stream ? kAccent2 : kRec, pulse);
-            dc_->FillEllipse(
-                D2D1::Ellipse(D2D1::Point2F(r.left + Px(20), r.top + Px(20)), Px(6), Px(6)),
-                Br(dot));
-        }
+        // The state is already on screen (transport buttons, rail STATUS, stats
+        // strip), so no extra indicator dot in the picture.
     }
 
 }
 
 void UiApp::DrawModePage(bool recordMode) {
-    DrawSceneRail();
-
     D2D1_RECT_F preview = PreviewRect();
     DrawPreview(preview);
     DrawPreviewStats(preview);
+
+    DrawSceneRail();
 
     if (recordMode)
         DrawRecordCards();
@@ -1903,12 +1868,12 @@ void UiApp::DrawModePage(bool recordMode) {
 }
 
 void UiApp::DrawSceneRail() {
-    const float x = 20, w = 280;
-    SectionLabel(L"SCENES", x, 64);
+    const float x = 20, w = 280, top = 376;
+    SectionLabel(L"SCENES", x, top);
 
     const int n = (int)scenes_.size();
-    Panel(S(x, 82, w, n * 34 + 4), 10, WithAlpha(kPanel, 0.35f), false);
-    float y = 86;
+    Panel(S(x, top + 18, w, n * 30 + 4), 10, WithAlpha(kPanel, 0.35f), false);
+    float y = top + 22;
     for (int i = 0; i < n && i < 6; ++i) {
         const int id = ID_SCENE_BASE + i;
         D2D1_RECT_F row = S(x, y, w, 30);
@@ -1922,21 +1887,34 @@ void UiApp::DrawSceneRail() {
         else
             dc_->FillRoundedRectangle(rr, Br(WithAlpha(kPanel, 0.7f)));
         if (active) dc_->DrawRoundedRectangle(rr, Br(WithAlpha(kAccent, 0.6f)), Px(1));
-        dc_->PushAxisAlignedClip(row, D2D1_ANTIALIAS_MODE_ALIASED);
+        dc_->PushAxisAlignedClip(S(row.left, row.top, row.right - row.left - Px(64),
+                                   row.bottom - row.top),
+                                 D2D1_ANTIALIAS_MODE_ALIASED);
         Text(scenes_[i].name, fmtBody_, Inset(row, 12, 0), active ? kText : kTextDim);
         dc_->PopAxisAlignedClip();
-        y += 34;
+        // reorder chevrons
+        D2D1_RECT_F su = S(x + w - 62, y + 4, 18, 22);
+        D2D1_RECT_F sd = S(x + w - 42, y + 4, 18, 22);
+        const bool canUp = i > 0;
+        const bool canDown = i + 1 < n;
+        if (canUp) hits_.push_back({ID_SCENE_UP_BASE + i, su, true});
+        if (canDown) hits_.push_back({ID_SCENE_DOWN_BASE + i, sd, true});
+        Text(L"\x25B2", fmtSmall_, su, canUp ? kTextDim : WithAlpha(kTextDim, 0.25f),
+             DWRITE_TEXT_ALIGNMENT_CENTER);
+        Text(L"\x25BC", fmtSmall_, sd, canDown ? kTextDim : WithAlpha(kTextDim, 0.25f),
+             DWRITE_TEXT_ALIGNMENT_CENTER);
+        y += 30;
     }
 
     // name + add/remove
-    y = 86 + n * 34 + 8;
-    Text(L"Name", fmtSmall_, S(x, y, 44, 34), WithAlpha(kTextDim, 0.85f));
-    Field(ID_SCENE_NAME, S(x + 46, y, 134, 34), &sceneName_, false, L"Scene name");
-    Button(ID_SCENE_ADD, S(x + 188, y, 44, 34), L"+", BtnStyle::Ghost, scenes_.size() < 6);
-    Button(ID_SCENE_REMOVE, S(x + 240, y, 40, 34), L"-", BtnStyle::Ghost, scenes_.size() > 1);
+    y = top + 22 + n * 30 + 8;
+    Text(L"Name", fmtSmall_, S(x, y, 44, 30), WithAlpha(kTextDim, 0.85f));
+    Field(ID_SCENE_NAME, S(x + 46, y, 134, 30), &sceneName_, false, L"Scene name");
+    Button(ID_SCENE_ADD, S(x + 188, y, 44, 30), L"+", BtnStyle::Ghost, scenes_.size() < 6);
+    Button(ID_SCENE_REMOVE, S(x + 240, y, 40, 30), L"-", BtnStyle::Ghost, scenes_.size() > 1);
 
     // ---- sources (the active scene's list)
-    y += 34 + 22;
+    y += 30 + 18;
     SectionLabel(L"SOURCES", x, y);
     addBtnRect_ = S(x + 196, y - 5, 84, 24);
     addMenuRect_ = S(x, y - 5, w, 24);
@@ -1946,7 +1924,7 @@ void UiApp::DrawSceneRail() {
     const UiScene& sc = scenes_[activeScene_];
     sourceRowRects_.assign(sc.sources.size(), D2D1_RECT_F{});
     for (size_t i = 0; i < sc.sources.size(); ++i) {
-        if (y > 484) break;  // leave room for the cursor row + activity card
+        if (y > 566) break;  // leave room for the cursor row + the status line
         D2D1_RECT_F row = S(x, y, w, 30);
         sourceRowRects_[i] = row;
         const int propId = ID_SRC_PROP_BASE + (int)i;
@@ -1954,21 +1932,22 @@ void UiApp::DrawSceneRail() {
         auto rr = D2D1::RoundedRect(row, Px(8), Px(8));
         dc_->FillRoundedRectangle(rr, Br(hover_ == propId ? kPanel2 : WithAlpha(kPanel, 0.7f)));
         dc_->DrawRoundedRectangle(rr, Br(kBorder), Px(1));
-        Text(SourceTag(sc.sources[i]), fmtPill_, S(x + 8, y, 40, 32), kAccent,
+        Text(SourceTag(sc.sources[i]), fmtPill_, S(x + 8, y, 40, 30), kAccent,
              DWRITE_TEXT_ALIGNMENT_CENTER);
-        dc_->PushAxisAlignedClip(S(x + 52, y, w - 52 - 120, 32), D2D1_ANTIALIAS_MODE_ALIASED);
+        dc_->PushAxisAlignedClip(S(x + 52, y, w - 52 - 120, 30), D2D1_ANTIALIAS_MODE_ALIASED);
         Text(Ellipsize(SourceLabel(sc.sources[i]), w - 52 - 120 - Px(6)), fmtSmall_,
-             S(x + 52, y, w - 52 - 120, 32),
+             S(x + 52, y, w - 52 - 120, 30),
              sc.sources[i].enabled ? kText : WithAlpha(kTextDim, 0.6f));
         dc_->PopAxisAlignedClip();
 
-        // z-order: chevrons move the source up/down (captures stay pinned so the
-        // primary capture never changes under a running session).
-        const bool isCapture = IsCaptureLayer(sc.sources[i]);
+        // z-order: chevrons reorder any source except the base capture, which
+        // supplies the frame everything else is drawn over.
+        const bool pinned = IsPrimaryCapture((int)i);
         D2D1_RECT_F upR = S(x + w - 94, y + 5, 18, 22);
         D2D1_RECT_F dnR = S(x + w - 74, y + 5, 18, 22);
-        const bool canUp = !isCapture && i > 0;
-        const bool canDown = !isCapture && i + 1 < sc.sources.size();
+        const bool canUp = !pinned && i > 0 && !IsPrimaryCapture((int)i - 1);
+        const bool canDown = !pinned && i + 1 < sc.sources.size() &&
+                             !IsPrimaryCapture((int)i + 1);
         if (canUp) hits_.push_back({ID_SRC_UP_BASE + (int)i, upR, true});
         if (canDown) hits_.push_back({ID_SRC_DOWN_BASE + (int)i, dnR, true});
         Text(L"\x25B2", fmtSmall_, upR, canUp ? kTextDim : WithAlpha(kTextDim, 0.25f),
@@ -1978,51 +1957,17 @@ void UiApp::DrawSceneRail() {
 
         Toggle(ID_SRC_TOGGLE_BASE + (int)i, S(x + w - 54, y, 50, 30), L"",
                &scenes_[activeScene_].sources[i].enabled, true, /*pinRight=*/true);
-        y += 34;
+        y += 30;
     }
 
     // cursor is a scene-level source-like switch
-    if (y <= 520) {
+    if (y <= 588) {
         Toggle(ID_SRC_CURSOR, S(x, y, w, 30), L"Show Cursor", &scenes_[activeScene_].cursor);
-        y += 34;
+        y += 30;
     }
 
-    // Live status fills the rail's leftover space with something useful, and the
-    // activity log sits under it as a compact strip (no tall empty card).
-    {
-        const float stTop = y + 8;
-        const float stH = 4 * 26 + 30;
-        if (stTop + stH + 96 < 624) {
-            Card(x, stTop, w, stH, L"STATUS");
-            float sy = stTop + 26;
-            auto row = [&](const std::wstring& label, const std::wstring& value,
-                           const D2D1_COLOR_F& valueColor) {
-                Text(label, fmtSmall_, S(x + 12, sy, 96, 24), WithAlpha(kTextDim, kHintAlpha));
-                Text(value, fmtSmall_, S(x + 108, sy, w - 120, 24), valueColor);
-                sy += 26;
-            };
-            row(L"Recording",
-                stats_.recording ? FormatTime(stats_.recSeconds) : L"idle",
-                stats_.recording ? kRec : WithAlpha(kTextDim, kHintAlpha));
-            row(L"Streaming", stats_.streaming ? FormatTime(stats_.strSeconds) : L"idle",
-                stats_.streaming ? kAccent : WithAlpha(kTextDim, kHintAlpha));
-            row(L"Replay", stats_.replayArmed ? Format(L"%d s", settings_.replaySeconds) : L"off",
-                stats_.replayArmed ? kText : WithAlpha(kTextDim, kHintAlpha));
-            row(L"Capture",
-                sessionRunning_ && stats_.width
-                    ? Format(L"%ux%u  %s", stats_.width, stats_.height,
-                             Widen(stats_.backend).c_str())
-                    : L"not running",
-                sessionRunning_ ? WithAlpha(kText, 0.85f) : WithAlpha(kTextDim, kHintAlpha));
-        }
-        const float actTop = stTop + stH + 8;
-        const float actH = (std::min)(624 - actTop, 132.f);
-        if (actH > 60) {
-            Card(x, actTop, w, actH, L"ACTIVITY");
-            const int lines = (std::max)(1, (int)((actH - 32) / 14));
-            DrawActivityStrip(S(x + 10, actTop + 26, w - 20, (float)lines * 14), lines);
-        }
-    }
+    // One line of feedback at the bottom of the rail (the newest log line).
+    DrawActivityStrip(S(x, 600, w, 16), 1);
 }
 
 std::wstring UiApp::SourceTag(const UiSource& s) const {
@@ -2585,8 +2530,11 @@ void UiApp::MoveSource(int index, int delta) {
     const int j = index + delta;
     if (index < 0 || index >= (int)sc.sources.size() || j < 0 || j >= (int)sc.sources.size())
         return;
-    if (IsCaptureLayer(sc.sources[index]) || IsCaptureLayer(sc.sources[j])) {
-        statusText_ = L"Capture sources keep their position (remove and re-add to move)";
+    // Only the base capture is pinned (it supplies the frame everything else is
+    // drawn over); every other source -- including extra windows and captures --
+    // can be reordered.
+    if (IsPrimaryCapture(index) || IsPrimaryCapture(j)) {
+        statusText_ = L"The base capture stays first — everything else can be reordered";
         statusError_ = false;
         return;
     }
@@ -2595,6 +2543,22 @@ void UiApp::MoveSource(int index, int delta) {
     SaveUiSettings(settings_);
     PushSceneSources();
     statusText_ = L"Source order updated";
+    statusError_ = false;
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void UiApp::MoveScene(int index, int delta) {
+    const int j = index + delta;
+    if (index < 0 || index >= (int)scenes_.size() || j < 0 || j >= (int)scenes_.size()) return;
+    std::swap(scenes_[index], scenes_[j]);
+    if (activeScene_ == index)
+        activeScene_ = j;
+    else if (activeScene_ == j)
+        activeScene_ = index;
+    SyncSettingsFromUi();
+    SaveUiSettings(settings_);
+    ApplyLiveScene();
+    statusText_ = L"Scene order updated";
     statusError_ = false;
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -2737,7 +2701,7 @@ void UiApp::DrawPreviewStats(const D2D1_RECT_F& r) {
 
 void UiApp::DrawRecordCards() {
     const float rowH = 30, gap = 4, pad = 10, headH = 18;
-    const float cy = 362, ch = pad + headH + 5 * rowH + 4 * gap + pad;
+    const float cy = 376, ch = pad + headH + 5 * rowH + 4 * gap + pad;
 
     // Two wider cards instead of three cramped ones: the encoder lives in
     // Settings > Encoding (it is not something you touch while recording).
@@ -2785,7 +2749,7 @@ void UiApp::DrawRecordCards() {
 
 void UiApp::DrawStreamCards() {
     const float rowH = 30, gap = 4, pad = 10, headH = 18;
-    const float cy = 362, ch = pad + headH + 6 * rowH + 5 * gap + pad;
+    const float cy = 376, ch = pad + headH + 6 * rowH + 5 * gap + pad;
 
     // Two wider cards: the stream encoder lives in Settings > Encoding.
     const float px = 320, pw = 352, pcw = pw - 2 * pad;
@@ -4617,6 +4581,14 @@ void UiApp::OnAction(int id) {
         MoveSource(id - ID_SRC_UP_BASE, -1);
         return;
     }
+    if (id >= ID_SCENE_UP_BASE && id < ID_SCENE_UP_BASE + 64) {
+        MoveScene(id - ID_SCENE_UP_BASE, -1);
+        return;
+    }
+    if (id >= ID_SCENE_DOWN_BASE && id < ID_SCENE_DOWN_BASE + 64) {
+        MoveScene(id - ID_SCENE_DOWN_BASE, +1);
+        return;
+    }
     if (id >= ID_SRC_DOWN_BASE && id < ID_SRC_DOWN_BASE + 64) {
         MoveSource(id - ID_SRC_DOWN_BASE, +1);
         return;
@@ -4631,7 +4603,9 @@ void UiApp::OnAction(int id) {
     }
     if (id >= ID_SRC_PROP_BASE && id < ID_SRC_PROP_BASE + 64) {
         const int i = id - ID_SRC_PROP_BASE;
-        if (i >= 0 && i < (int)scenes_[activeScene_].sources.size()) {
+        if (openAction_ == id) {
+            openAction_ = 0;  // clicking the same source again closes its list
+        } else if (i >= 0 && i < (int)scenes_[activeScene_].sources.size()) {
             BuildSourceProperties(i);
             actionSource_ = i;
             openAction_ = ID_SRC_PROP_BASE + i;
@@ -5113,7 +5087,9 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             const bool onPopupItem = press_ >= ID_ITEM_BASE && press_ < ID_ITEM_BASE + 64;
             const bool onPopupOwner =
                 (press_ != 0 && press_ == openCombo_) ||
-                (press_ == ID_ADD_SOURCE && openAction_ == ID_ADD_SOURCE);
+                (press_ == ID_ADD_SOURCE && openAction_ == ID_ADD_SOURCE) ||
+                (press_ >= ID_SRC_PROP_BASE && press_ < ID_SRC_PROP_BASE + 64 &&
+                 openAction_ == press_);  // same row: the release toggles it shut
             if ((openAction_ || openCombo_ >= 0) && !onPopupItem && !onPopupOwner) {
                 openAction_ = 0;
                 openCombo_ = -1;

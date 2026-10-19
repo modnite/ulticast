@@ -13,6 +13,8 @@ struct UiSourceSetting {
     int dxgi = 0;          // Capture: DXGI duplication
     int corner = 3;        // Video: PiP corner
     float camX = -1, camY = -1;  // Video: free PiP position
+    // Orientation: bit0 = flip H, bit1 = flip V, bits 2-3 = quarter turns.
+    int flags = 0;
 };
 
 // One scene: a named source layout the user can switch between.

@@ -219,6 +219,7 @@ enum {
     ID_OPENLOGS,
     ID_REPORT,
     ID_COPYLOG,
+    ID_PREVIEW_FULL,
     ID_BROWSE,
     ID_ITEM_BASE = 1000,
     ID_SCENE_BASE = 2000,
@@ -499,6 +500,7 @@ private:
     void RefreshWindowCombo();
     void UpdateUiTick();   // keep the preview in step with the capture rate
     void ApplyPendingUrlEdit();  // debounced overlay URL reload (runs from Paint)
+    void TogglePreviewFullscreen(bool on);
     void OnTrayCommand(int id);
     void InitTray();
     void ShowTrayMenu();
@@ -556,6 +558,11 @@ private:
     double previewFps_ = 0.0;
     double paintMs_ = 0.0;   // cost of the last full UI paint (diagnostic)
     bool fastTimer_ = false;  // 1 ms system timer active (live preview pacing)
+    // Fullscreen preview (theater mode): the preview fills the screen, no chrome.
+    bool previewFullscreen_ = false;
+    LONG savedStyle_ = 0;
+    RECT savedRect_{};
+    bool savedMaximized_ = false;
     std::map<int, D2D1_RECT_F> comboRects_, sliderRects_, fieldRects_;
     std::map<int, std::pair<int, int>> sliderRange_;  // id -> (min, max)
     std::map<int, int*> sliderValue_;                 // id -> bound value
@@ -625,6 +632,8 @@ private:
         bool dxgi = false;       // Capture: DXGI duplication instead of WGC
         int corner = 3;          // Video: PiP corner preset
         float camX = -1, camY = -1;  // Video: free PiP position (0..1 of canvas)
+        bool flipH = false, flipV = false;  // orientation
+        int rotate = 0;          // 0..3 quarter turns
     };
     struct UiScene {
         std::wstring name;
@@ -1572,15 +1581,24 @@ void UiApp::Paint() {
     fieldRects_.clear();
     hasPopup_ = false;
 
-    DrawHeader();
-    if (page_ == 2)
-        DrawSettingsPage();
-    else
-        DrawModePage(page_ == 0);
-    if (openAction_)
-        DrawActionPopup();
-    else
-        DrawPopup();
+    if (previewFullscreen_) {
+        // Theater mode: the preview fills the screen, nothing else.
+        D2D1_RECT_F full = S(0, 0, kWinW, kWinH);
+        DrawPreview(full);
+        DrawPreviewStats(full);
+        Text(L"F11 or Esc exits fullscreen", fmtSmall_, S(20, kWinH - 30, 400, 20),
+             WithAlpha(kTextDim, 0.7f));
+    } else {
+        DrawHeader();
+        if (page_ == 2)
+            DrawSettingsPage();
+        else
+            DrawModePage(page_ == 0);
+        if (openAction_)
+            DrawActionPopup();
+        else
+            DrawPopup();
+    }
     DrawFocusRing();  // keyboard focus indicator (Tab navigation)
 
     HRESULT hr = dc_->EndDraw();
@@ -1761,6 +1779,38 @@ void UiApp::DrawPreview(const D2D1_RECT_F& r) {
         Text(info, fmtSmall_, D2D1::RectF(pill.left + Px(12), pill.top, pill.right - Px(12),
                                           pill.bottom),
              kText);
+    }
+
+    // Fullscreen toggle: four corner brackets, top-left (the stats pill is top-right).
+    D2D1_RECT_F fs = D2D1::RectF(r.left + Px(10), r.top + Px(10), r.left + Px(36), r.top + Px(36));
+    hits_.push_back({ID_PREVIEW_FULL, fs, true});
+    const bool fsHover = hover_ == ID_PREVIEW_FULL;
+    dc_->FillRoundedRectangle(D2D1::RoundedRect(fs, Px(6), Px(6)),
+                              Br(WithAlpha(kBlack, fsHover ? 0.6f : 0.35f)));
+    dc_->DrawRoundedRectangle(D2D1::RoundedRect(fs, Px(6), Px(6)),
+                              Br(WithAlpha(kWhite, fsHover ? 0.25f : 0.12f)), Px(1));
+    {
+        const float m = Px(9), len = Px(6);
+        const D2D1_COLOR_F gc = WithAlpha(kWhite, 0.85f);
+        // inward marks when already fullscreen (exit), outward otherwise
+        const float d = previewFullscreen_ ? 0.f : 0.f;
+        (void)d;
+        dc_->DrawLine(D2D1::Point2F(fs.left + m, fs.top + m),
+                      D2D1::Point2F(fs.left + m + len, fs.top + m), Br(gc), Px(1.6f));
+        dc_->DrawLine(D2D1::Point2F(fs.left + m, fs.top + m),
+                      D2D1::Point2F(fs.left + m, fs.top + m + len), Br(gc), Px(1.6f));
+        dc_->DrawLine(D2D1::Point2F(fs.right - m, fs.top + m),
+                      D2D1::Point2F(fs.right - m - len, fs.top + m), Br(gc), Px(1.6f));
+        dc_->DrawLine(D2D1::Point2F(fs.right - m, fs.top + m),
+                      D2D1::Point2F(fs.right - m, fs.top + m + len), Br(gc), Px(1.6f));
+        dc_->DrawLine(D2D1::Point2F(fs.left + m, fs.bottom - m),
+                      D2D1::Point2F(fs.left + m + len, fs.bottom - m), Br(gc), Px(1.6f));
+        dc_->DrawLine(D2D1::Point2F(fs.left + m, fs.bottom - m),
+                      D2D1::Point2F(fs.left + m, fs.bottom - m - len), Br(gc), Px(1.6f));
+        dc_->DrawLine(D2D1::Point2F(fs.right - m, fs.bottom - m),
+                      D2D1::Point2F(fs.right - m - len, fs.bottom - m), Br(gc), Px(1.6f));
+        dc_->DrawLine(D2D1::Point2F(fs.right - m, fs.bottom - m),
+                      D2D1::Point2F(fs.right - m, fs.bottom - m - len), Br(gc), Px(1.6f));
     }
 
     if (sessionRunning_ && !stats_.paused) {
@@ -1987,6 +2037,9 @@ void UiApp::BuildSourceProperties(int sourceIndex) {
             if (!s.window.empty()) add(1, L"Change window… (" + s.window + L")");
             add(2, s.dxgi ? L"Game mode (DXGI duplication): on"
                           : L"Game mode (DXGI duplication): off");
+            add(11, s.flipH ? L"Flip horizontal: on" : L"Flip horizontal: off");
+            add(12, s.flipV ? L"Flip vertical: on" : L"Flip vertical: off");
+            add(13, Format(L"Rotate 90°  (now %d°)", (s.rotate & 3) * 90));
             if (IsSecondaryCapture(sourceIndex)) {
                 for (int c = 0; c < 4; ++c) {
                     std::wstring label = L"Position: " + positions_[c];
@@ -2002,12 +2055,18 @@ void UiApp::BuildSourceProperties(int sourceIndex) {
                 if (t == s.window) label += L"  (current)";
                 add(10, label, Narrow(t));
             }
+            add(11, s.flipH ? L"Flip horizontal: on" : L"Flip horizontal: off");
+            add(12, s.flipV ? L"Flip vertical: on" : L"Flip vertical: off");
+            add(13, Format(L"Rotate 90°  (now %d°)", (s.rotate & 3) * 90));
             add(5, L"Remove source");
             break;
         }
         case SessionSourceType::Webcam: {
             add(6, L"Default camera / capture card");
             for (size_t i = 1; i < webcams_.size(); ++i) add(3, webcams_[i], Narrow(webcams_[i]));
+            add(11, s.flipH ? L"Flip horizontal: on" : L"Flip horizontal: off");
+            add(12, s.flipV ? L"Flip vertical: on" : L"Flip vertical: off");
+            add(13, Format(L"Rotate 90°  (now %d°)", (s.rotate & 3) * 90));
             for (int c = 0; c < 4; ++c) {
                 std::wstring label = L"Position: " + positions_[c];
                 if (c == s.corner) label += L"  (current)";
@@ -2089,6 +2148,18 @@ void UiApp::ApplySourceProperty(int sourceIndex, int itemIndex) {
         case 10:  // window chosen from the picker list
             s.type = SessionSourceType::Window;
             s.window = Widen(it.value);
+            captureChanged = true;
+            break;
+        case 11:  // flip horizontal
+            s.flipH = !s.flipH;
+            captureChanged = true;
+            break;
+        case 12:  // flip vertical
+            s.flipV = !s.flipV;
+            captureChanged = true;
+            break;
+        case 13:  // rotate a quarter turn
+            s.rotate = (s.rotate + 1) & 3;
             captureChanged = true;
             break;
     }
@@ -3489,6 +3560,9 @@ void UiApp::ApplySettingsToUi() {
             u.corner = (ss.corner >= 0 && ss.corner < 4) ? ss.corner : 3;
             u.camX = ss.camX;
             u.camY = ss.camY;
+            u.flipH = (ss.flags & 1) != 0;
+            u.flipV = (ss.flags & 2) != 0;
+            u.rotate = (ss.flags >> 2) & 3;
             us.sources.push_back(u);
         }
         EnsureSceneDefaults(us);
@@ -3562,6 +3636,7 @@ void UiApp::SyncSettingsFromUi() {
             ss.corner = src.corner;
             ss.camX = src.camX;
             ss.camY = src.camY;
+            ss.flags = (src.flipH ? 1 : 0) | (src.flipV ? 2 : 0) | ((src.rotate & 3) << 2);
             us.sources.push_back(ss);
         }
         settings_.scenes.push_back(us);
@@ -4050,6 +4125,31 @@ void UiApp::UpdateUiTick() {
     }
 }
 
+void UiApp::TogglePreviewFullscreen(bool on) {
+    if (on == previewFullscreen_) return;
+    previewFullscreen_ = on;
+    if (on) {
+        savedStyle_ = GetWindowLongW(hwnd_, GWL_STYLE);
+        GetWindowRect(hwnd_, &savedRect_);
+        savedMaximized_ = IsZoomed(hwnd_) != 0;
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        if (GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &mi)) {
+            SetWindowLongW(hwnd_, GWL_STYLE, (savedStyle_ & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
+            SetWindowPos(hwnd_, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                         mi.rcMonitor.right - mi.rcMonitor.left,
+                         mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_FRAMECHANGED);
+        }
+    } else {
+        SetWindowLongW(hwnd_, GWL_STYLE, savedStyle_);
+        SetWindowPos(hwnd_, nullptr, savedRect_.left, savedRect_.top,
+                     savedRect_.right - savedRect_.left, savedRect_.bottom - savedRect_.top,
+                     SWP_FRAMECHANGED | SWP_NOZORDER);
+        if (savedMaximized_) ShowWindow(hwnd_, SW_MAXIMIZE);
+    }
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
 void UiApp::ApplyPendingUrlEdit() {
     // Live overlay URL: a moment after typing stops, point the running browser at
     // the new address (navigating beats a Stop/Start cycle). Runs from Paint: the
@@ -4292,6 +4392,9 @@ void UiApp::OnAction(int id) {
         case ID_OPENLOGS:
             ShellExecuteW(nullptr, L"open", Widen(Diag::LogDir()).c_str(), nullptr, nullptr,
                           SW_SHOWNORMAL);
+            break;
+        case ID_PREVIEW_FULL:
+            TogglePreviewFullscreen(!previewFullscreen_);
             break;
         case ID_COPYLOG: {
             // One click: the log tail on the clipboard, ready to paste into a chat.
@@ -4838,7 +4941,15 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_KEYDOWN: {
+            if (wp == VK_F11) {
+                TogglePreviewFullscreen(!previewFullscreen_);
+                return 0;
+            }
             if (wp == VK_ESCAPE) {
+                if (previewFullscreen_) {
+                    TogglePreviewFullscreen(false);
+                    return 0;
+                }
                 openAction_ = 0;
                 openCombo_ = -1;
                 focus_ = 0;

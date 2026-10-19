@@ -78,6 +78,8 @@ struct Options {
     int preset = 5;
     int bframes = 0;
     bool lookahead = false;
+    bool flipH = false, flipV = false;  // mirror the capture
+    int rotate = 0;                     // quarter turns
 
     bool noAudio = false;
     bool desktopAudio = true;
@@ -222,6 +224,9 @@ int wmain(int argc, wchar_t** argv) {
             // quietly capturing the whole monitor.
             o.windowSource = true;
         }
+        else if (a == L"--flip-h") o.flipH = true;
+        else if (a == L"--flip-v") o.flipV = true;
+        else if (a == L"--rotate") takeInt(o.rotate);
         else if (a == L"--out") takeS(o.out);
         else if (a == L"--seconds") takeD(o.seconds);
         else if (a == L"--fps") takeU32(o.fps);
@@ -477,6 +482,9 @@ int wmain(int argc, wchar_t** argv) {
     cfg.monitor = o.monitor;
     cfg.window = o.window;
     cfg.windowSource = o.windowSource;
+    cfg.flipH = o.flipH;
+    cfg.flipV = o.flipV;
+    cfg.rotate = o.rotate;
     cfg.backend = o.backend;
     cfg.fps = o.fps;
     cfg.adapter = o.adapter;

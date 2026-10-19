@@ -13,6 +13,7 @@ cbuffer Layer : register(b0) {
     float3 pad;
     float4 keyColor;  // rgb + w = key enabled
     float4 keyParams; // x = similarity, y = smoothness
+    float4 xform;     // x,y = uv flip (+1/-1), z = quarter turns, w unused
 };
 
 struct VSOut {
@@ -25,7 +26,16 @@ VSOut VSMain(uint id : SV_VertexID) {
     float2 corner = float2(id & 1, (id >> 1) & 1);
     VSOut o;
     o.pos = float4(rect.xy + corner * rect.zw, 0.0, 1.0);
-    o.uv = corner;
+    float2 uv = corner;
+    if (xform.x < 0) uv.x = 1.0 - uv.x;   // flip horizontally
+    if (xform.y < 0) uv.y = 1.0 - uv.y;   // flip vertically
+    if (xform.z != 0.0) {                 // rotate in 90 degree steps
+        float2 c = uv - 0.5;
+        float a = xform.z * 1.5707963;
+        float s = sin(a), co = cos(a);
+        uv = float2(c.x * co - c.y * s, c.x * s + c.y * co) + 0.5;
+    }
+    o.uv = uv;
     return o;
 }
 
@@ -56,6 +66,7 @@ struct LayerCB {
     float pad[3];
     float keyColor[4];
     float keyParams[4];
+    float xform[4];  // flip x/y, quarter turns, unused
 };
 
 bool Compositor::Init(ID3D11Device* device, ID3D11DeviceContext* ctx, uint32_t canvasW,
@@ -207,6 +218,10 @@ void Compositor::Render(ID3D11RenderTargetView* target, const LayerDraw* layers,
         cb.keyParams[1] = l.smoothness;
         cb.keyParams[2] = l.useAlpha ? 1.0f : 0.0f;
         cb.keyParams[3] = l.premultiplied ? 1.0f : 0.0f;
+        cb.xform[0] = l.flipX ? -1.0f : 1.0f;
+        cb.xform[1] = l.flipY ? -1.0f : 1.0f;
+        cb.xform[2] = (float)(l.rotate & 3);
+        cb.xform[3] = 0.0f;
 
         D3D11_MAPPED_SUBRESOURCE map{};
         if (SUCCEEDED(ctx_->Map(cb_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {

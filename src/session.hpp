@@ -42,6 +42,10 @@ struct SessionSource {
     bool dxgi = false;         // Capture: use DXGI duplication (fullscreen games)
     int corner = 3;            // Video: PiP corner (0 TL, 1 TR, 2 BL, 3 BR)
     std::wstring audioDevice;  // AudioIn/Out: device name substring ("" = default)
+    // Orientation: flip and quarter-turn rotation, applied on the GPU when this
+    // source's layer is composited.
+    bool flipH = false, flipV = false;
+    int rotate = 0;            // 0..3 quarter turns
 };
 
 // Everything a run needs. The UI fills this from its widgets; the CLI from flags.
@@ -106,6 +110,9 @@ struct SessionConfig {
     int browserHeight = 0;
 
     bool showCursor = true;      // DXGI duplication cursor compositing
+    // Orientation (flip / quarter turns), applied when the layer is composited.
+    bool flipH = false, flipV = false;
+    int rotate = 0;
     bool forceDshow = false;     // debug/testing: try DirectShow before Media Foundation
     bool sceneFade = true;       // crossfade ~250 ms when the scene changes
 

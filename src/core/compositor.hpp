@@ -20,6 +20,11 @@ struct LayerDraw {
     // and un-premultiply it if the source provides premultiplied alpha.
     bool useAlpha = false;
     bool premultiplied = false;
+
+    // Orientation (applied in the vertex shader, so it costs nothing): flip and
+    // quarter-turn rotation about the layer's centre.
+    bool flipX = false, flipY = false;
+    int rotate = 0;  // 0..3 quarter turns
 };
 
 // Minimal D3D11 layer compositor. Renders into any BGRA8 render target --

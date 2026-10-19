@@ -209,6 +209,37 @@ foreach ($backend in @('dxgi', 'wgc')) {
     }
 }
 
+# ---- source orientation (GPU flip / rotate) --------------------------------
+# The flipped capture must look like the horizontal mirror of the plain one.
+$fa = Start-Process -FilePath $exe -ArgumentList "--monitor 0 --seconds 2 --out `"$t\flip-a.mkv`"" -PassThru -NoNewWindow
+$fb = Start-Process -FilePath $exe -ArgumentList "--monitor 0 --seconds 2 --flip-h --out `"$t\flip-b.mkv`"" -PassThru -NoNewWindow
+$fa.WaitForExit()
+$fb.WaitForExit()
+if ((ExtractFrame "$t\flip-a.mkv" 1 "$t\flip-a.png") -and
+    (ExtractFrame "$t\flip-b.mkv" 1 "$t\flip-b.png")) {
+    $ia = New-Object System.Drawing.Bitmap "$t\flip-a.png"
+    $ib = New-Object System.Drawing.Bitmap "$t\flip-b.png"
+    $same = 0.0
+    $mir = 0.0
+    $n = 0
+    for ($y = 0; $y -lt $ia.Height; $y += 24) {
+        for ($x = 0; $x -lt $ia.Width; $x += 24) {
+            $pa = $ia.GetPixel($x, $y)
+            $pb = $ib.GetPixel($x, $y)
+            $pm = $ia.GetPixel($ia.Width - 1 - $x, $y)
+            $same += [Math]::Abs($pa.R - $pb.R) + [Math]::Abs($pa.G - $pb.G) + [Math]::Abs($pa.B - $pb.B)
+            $mir += [Math]::Abs($pm.R - $pb.R) + [Math]::Abs($pm.G - $pb.G) + [Math]::Abs($pm.B - $pb.B)
+            $n++
+        }
+    }
+    $ia.Dispose()
+    $ib.Dispose()
+    Check 'flip-h mirrors the captured frame' (($n -gt 0) -and ($mir -lt $same / 2)) `
+          "unmirrored=$([math]::Round($same / $n, 1)) mirrored=$([math]::Round($mir / $n, 1))"
+} else {
+    Check 'flip-h mirrors the captured frame' $false 'frame extraction failed'
+}
+
 # ------------------------------------------------------------------ summary
 Write-Host ''
 Write-Host ("RESULT: " + $script:pass + " passed, " + $script:fail + " failed") -ForegroundColor ($(if ($script:fail -eq 0) { 'Green' } else { 'Red' }))

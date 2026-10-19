@@ -979,6 +979,14 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
     }
 
     int captureIdx = 0;
+    // Orientation (flip / quarter turns) is applied to whichever layer was pushed
+    // last, in the compositor's vertex shader.
+    auto applyXform = [&](const SessionSource& s) {
+        if (layerCount <= 0) return;
+        layers[layerCount - 1].flipX = s.flipH;
+        layers[layerCount - 1].flipY = s.flipV;
+        layers[layerCount - 1].rotate = s.rotate & 3;
+    };
     for (const auto& s : sources) {
         if (!s.enabled || layerCount >= 8) continue;
 
@@ -1008,6 +1016,12 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
                     h = (float)s.h;
                 }
                 pushLayer(base, x, y, w, h);
+                applyXform(s);
+                // CLI path: the primary capture's orientation can come from the
+                // config (--flip-h / --flip-v / --rotate).
+                if (cfg_.flipH) layers[layerCount - 1].flipX = true;
+                if (cfg_.flipV) layers[layerCount - 1].flipY = true;
+                if (cfg_.rotate) layers[layerCount - 1].rotate = cfg_.rotate & 3;
                 if (cfg_.chroma && cfg_.chromaLayer == 1) applyKey(layers[layerCount - 1]);
             } else if ((size_t)(ci - 1) < extraCaps_.size()) {
                 ExtraCapture* e = extraCaps_[ci - 1].get();
@@ -1053,6 +1067,7 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
                         y = top ? margin : canvasH - h - margin;
                     }
                     pushLayer(e->srv.Get(), x, y, w, h);
+                    applyXform(s);
                 }
             }
         } else if (s.type == SessionSourceType::Webcam) {
@@ -1122,6 +1137,7 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
                     y = top ? margin : canvasH - h - margin;
                 }
                 pushLayer(v->srv.Get(), x, y, w, h);
+                applyXform(s);
                 if (cfg_.chroma && cfg_.chromaLayer == 0) applyKey(layers[layerCount - 1]);
             }
         } else if (s.type == SessionSourceType::Browser) {
@@ -1171,6 +1187,7 @@ void Session::OnFrame(ID3D11Texture2D* src, uint32_t fw, uint32_t fh, uint64_t f
                 const float w = (float)(s.w > 0 ? s.w : (int)canvasW);
                 const float h = (float)(s.h > 0 ? s.h : (int)canvasH);
                 pushLayer(browserSrv_.Get(), (float)s.x, (float)s.y, w, h);
+                applyXform(s);
                 layers[layerCount - 1].useAlpha = true;
                 layers[layerCount - 1].premultiplied = true;  // CEF OSR paints premultiplied BGRA
             }

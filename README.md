@@ -140,6 +140,11 @@ Please attach `diagnostics-*.txt` and the newest log to
   from a shared texture), the overlay **reloads as you type** its URL (and a bare host such as
   `example.com` is now treated as a web address, not a file), the page switcher became a **menu
   bar** with an accent underline, and slider drags persist on release — released in v0.9.6
+- **Stage 19** preview **fullscreen** (the corner button or F11; Esc restores the window) and per-source
+  **orientation**: flip horizontal/vertical and 90° rotation steps, applied in the compositor's vertex
+  shader so they cost nothing, exposed in each source's properties popup and on the CLI
+  (`--flip-h`, `--flip-v`, `--rotate N`). The engine suite proves the flip is a true mirror
+  (mirrored difference 2.6 vs 41.3 unmirrored) — released in v0.9.8
 - Next: on-hardware validation on the RTX 3080 rig
 
 ## The UI (Ulticast-ui.exe)
@@ -236,6 +241,8 @@ together (the same separation ShadowPlay/OBS users expect).
 | **Keyboard navigation** | Tab/Shift+Tab focus ring, Enter/Space activation, arrows on popups and sliders — asserted by the UI harness (pixel + settings checks) |
 | **Preview rate** | measured on screen: capture 59 fps / preview 59 fps, 3.9 ms per frame (the strip shows both; the engine used to hand over every third frame) |
 | **Menu bar** | Record / Stream / Settings as flat menu items with an accent underline; the status pill (PREVIEW / RECORDING / LIVE) stays on the right |
+| **Fullscreen preview** | the corner button or F11 fills the screen with the preview alone; Esc restores the previous window state |
+| **Source orientation** | flip H/V and 90° rotation steps per source, applied on the GPU (vertex shader). CLI: `--flip-h`, `--flip-v`, `--rotate N`; asserted by a mirror comparison in the engine suite |
 | Settings persistence | `settings.ini` written and re-loaded on next launch |
 | Engine regressions (CLI) | pause (8 s → 6 s media), webcam + replay + audio combo, RTMP round-trip |
 | **Dual output** | H.264 → RTMP and HEVC → disk simultaneously, both ~5.95 s |
@@ -265,8 +272,8 @@ produces the installer and portable zip on the Releases page. Two test harnesses
 
 - `tools/smoke-test.ps1` — end-to-end engine checks against real files and pixels (needs an NVIDIA
   GPU; run it locally): record/pause/RTMP/replay/dual output/browser overlay/noise gate/compressor/
-  mic monitoring/DirectShow/window capture/cursor toggling on both backends.
-- `tools/ui-test.ps1` — UI click-through automation (36 checks): launches the app against a
+  mic monitoring/DirectShow/window capture/cursor toggling on both backends/flip orientation.
+- `tools/ui-test.ps1` — UI click-through automation (38 checks): launches the app against a
   throwaway profile, drives it with synthetic clicks and key events at design coordinates, and
   asserts on pixels and the persisted settings (pages, tab switching, accent swatches, theme repaint
   + persistence, add-source menu open/close, **text editing** — Ctrl+A, typing at the caret,

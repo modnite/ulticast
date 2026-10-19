@@ -428,6 +428,26 @@ $clipOk = ($clip -ne $null) -and $clip.Contains('Ulticast') -and $clip.Contains(
 Check 'copy log: the log tail lands on the clipboard' $clipOk `
       $(if ($clip) { "clipboard=" + $clip.Substring(0, [Math]::Min(60, $clip.Length)) } else { 'empty clipboard' })
 
+# ------------------------------------------------------------ fullscreen ----
+# F11 fills the screen with the preview; Esc restores the window.
+$crBefore = New-Object UlticastUiTest+RECT
+[UlticastUiTest]::GetClientRect($hwnd, [ref]$crBefore) | Out-Null
+$wBefore = $crBefore.Right - $crBefore.Left
+KeyDown $hwnd 0x7A            # F11
+Start-Sleep -Milliseconds 900
+$crFs = New-Object UlticastUiTest+RECT
+[UlticastUiTest]::GetClientRect($hwnd, [ref]$crFs) | Out-Null
+$wFs = $crFs.Right - $crFs.Left
+Shot $hwnd '20-fullscreen' | Out-Null
+KeyDown $hwnd 0x1B            # Esc
+Start-Sleep -Milliseconds 900
+$crBack = New-Object UlticastUiTest+RECT
+[UlticastUiTest]::GetClientRect($hwnd, [ref]$crBack) | Out-Null
+$wBack = $crBack.Right - $crBack.Left
+Check 'fullscreen preview: F11 expands, Esc restores' `
+      ($wFs -gt $wBefore -and $wBack -eq $wBefore) `
+      "before=$wBefore fullscreen=$wFs back=$wBack"
+
 # ------------------------------------------------------------ tray & exit ---
 # Reported: "doesn't gracefully exit or clear from the system tray on close".
 # With the browser overlay live: Close-to-tray keeps the app running, and Exit

@@ -316,7 +316,9 @@ Start-Sleep -Seconds 5        # debounce + navigate + load
 $logFile = Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Ulticast\logs\ui-*.log') -ErrorAction SilentlyContinue |
            Sort-Object LastWriteTime -Descending | Select-Object -First 1
 $logText = if ($logFile) { Get-Content $logFile.FullName -Raw } else { '' }
-Check 'browser overlay: the typed URL loads live (bare host gets https)' `
+Check 'browser overlay: the typed URL is applied live' `
+      ((SettingValue 'browserUrl') -eq 'example.com') "browserUrl=$(SettingValue 'browserUrl')"
+Check 'browser overlay: the typed URL loads (bare host gets https)' `
       ($logText -match 'loaded \(HTTP 200\)') 'no successful live navigation logged'
 
 # ---------------------------------------------------------------- presets ---

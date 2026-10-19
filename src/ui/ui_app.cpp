@@ -498,6 +498,7 @@ private:
     void DrawFocusRing();
     void RefreshWindowCombo();
     void UpdateUiTick();   // keep the preview in step with the capture rate
+    void ApplyPendingUrlEdit();  // debounced overlay URL reload (runs from Paint)
     void OnTrayCommand(int id);
     void InitTray();
     void ShowTrayMenu();
@@ -1537,6 +1538,7 @@ void UiApp::Paint() {
     }
 
     RefreshPreview();
+    ApplyPendingUrlEdit();  // overlay URL typed: reload once typing settles
 
     // Zoom-to-fit: the design is 1020x660, but the window may be any size
     // (DPI scaling, maximize, resize) — scale to fit and center it.
@@ -2902,7 +2904,7 @@ void UiApp::DrawSettingsPage() {
                 Field(ID_FIELD_BROWSER, S(x + pad, y, cw, rowH), &browserText_, false,
                       L"HTML file or https:// URL (alerts, chat, widgets)");
                 y += rowH + rowGap;
-                Button(ID_BROWSER_TEST, S(x + pad, y, 150, rowH), L"Test overlay",
+                Button(ID_BROWSER_TEST, S(x + pad, y, 150, rowH), L"Demo page",
                        BtnStyle::Ghost);
                 Button(ID_BROWSER_RELOAD, S(x + pad + 158, y, 100, rowH), L"Reload",
                        BtnStyle::Ghost, sessionRunning_ && !settings_.browserUrl.empty());
@@ -4046,27 +4048,29 @@ void UiApp::UpdateUiTick() {
         uiTickMs_ = 66;
         SetTimer(hwnd_, kTimerId, 66, nullptr);
     }
+}
 
+void UiApp::ApplyPendingUrlEdit() {
     // Live overlay URL: a moment after typing stops, point the running browser at
-    // the new address (navigating beats a Stop/Start cycle).
-    if (browserUrlDirtyMs_ && GetTickCount64() - browserUrlDirtyMs_ > 700) {
-        browserUrlDirtyMs_ = 0;
-        SyncSettingsFromUi();
-        SaveUiSettings(settings_);
-        if (!settings_.browserUrl.empty()) {
-            if (sessionRunning_) {
-                session_.SetBrowserUrl(settings_.browserUrl);
-                statusText_ = L"Overlay loading…";
-                statusError_ = false;
-            } else if (SceneUsesBrowser()) {
-                RestartPreview();  // bring the overlay up so the URL is visible
-                statusText_ = L"Overlay loading…";
-                statusError_ = false;
-            } else {
-                statusText_ = L"No Browser source in this scene — press Test overlay";
-                statusError_ = false;
-            }
-        }
+    // the new address (navigating beats a Stop/Start cycle). Runs from Paint: the
+    // self-scheduled preview loop starves WM_TIMER, so a timer callback would
+    // never fire while a session is live.
+    if (!browserUrlDirtyMs_ || GetTickCount64() - browserUrlDirtyMs_ <= 700) return;
+    browserUrlDirtyMs_ = 0;
+    SyncSettingsFromUi();
+    SaveUiSettings(settings_);
+    if (settings_.browserUrl.empty()) return;
+    if (sessionRunning_) {
+        session_.SetBrowserUrl(settings_.browserUrl);
+        statusText_ = L"Overlay loading…";
+        statusError_ = false;
+    } else if (SceneUsesBrowser()) {
+        RestartPreview();  // bring the overlay up so the URL is visible
+        statusText_ = L"Overlay loading…";
+        statusError_ = false;
+    } else {
+        statusText_ = L"No Browser source in this scene — press Test overlay";
+        statusError_ = false;
     }
 }
 

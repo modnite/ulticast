@@ -157,7 +157,16 @@ Please attach `diagnostics-*.txt` and the newest log to
   second time **closes** its list instead of reopening it, the status chip and the preview's recording
   dot are gone, and the **preview now inhabits the top band** (full content width) with the scene rail
   and the cards below it — released in v0.9.10
-- Next: on-hardware validation on the RTX 3080 rig
+- **Stage 22** audio moved out of the scene-source model into a **mixer strip** with real metering:
+  each channel (mic, desktop) has mute, gain and a live **post-fader, post-filter level meter**
+  (green/amber/red with a peak-hold marker, dB readout) fed from the audio thread; the mic and
+  desktop entries are gone from the add-source menu and the source list. The preview's info banner
+  moved out of the picture (state, timer and numbers now sit in the rail and the transport row), the
+  resolution pill was removed, and the presentation path switched to a non-blocking vsync present
+  with a frame-latency cap (the Windows 11 queue-full stall) plus a log line recording the display
+  mode — released in v0.9.11
+- Next: dockable/resizable panels, per-source filters and transitions (derived from how established
+  capture apps structure this), then on-hardware validation on the RTX 3080 rig
 
 ## The UI (Ulticast-ui.exe)
 

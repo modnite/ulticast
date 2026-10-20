@@ -15,6 +15,7 @@
 #include <commdlg.h>
 #include <d2d1_1.h>
 #include <d2d1_1helper.h>
+#include <dxgi1_3.h>  // IDXGISwapChain2: frame-latency waitable object
 #include <dwmapi.h>
 #include <dwrite.h>
 #include <shellapi.h>
@@ -407,7 +408,10 @@ private:
     void DrawSceneRail();
     void DrawPreview(const D2D1_RECT_F& r);
     void DrawPreviewStats(const D2D1_RECT_F& r);
-    void DrawTransport(int mode);  // 0 = record, 1 = stream, 2 = both
+    void DrawTransport(int mode);
+    void DrawAudioMixer(const D2D1_RECT_F& r);
+    // Peak-hold values for the mixer meters (decay toward the live peak).
+    float micHold_ = 0.f, deskHold_ = 0.f;  // 0 = record, 1 = stream, 2 = both
     void DrawActivityStrip(const D2D1_RECT_F& r, int maxLines);
     void DrawPopup();
     void ApplyCaptionTheme();
@@ -576,7 +580,9 @@ private:
     uint64_t previewFpsT0_ = 0;
     double previewFps_ = 0.0;
     double paintMs_ = 0.0;   // cost of the last full UI paint (diagnostic)
+    bool paintErrLogged_ = false;
     bool fastTimer_ = false;  // 1 ms system timer active (live preview pacing)
+    ComPtr<IDXGISwapChain1> swap1_;  // Present1: non-blocking vsync
     // Fullscreen preview (theater mode): the preview fills the screen, no chrome.
     bool previewFullscreen_ = false;
     LONG savedStyle_ = 0;
@@ -898,12 +904,30 @@ bool UiApp::InitGraphics() {
     sd.SampleDesc.Count = 1;
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     sd.BufferCount = 2;
+    // Flip-sequential (capturable by tools) with a latency cap; the pacing is done
+    // by a non-blocking vsync present (Present1 + DO_NOT_WAIT), which behaves the
+    // same on Windows 10 and 11 and cannot stall the message loop.
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
     sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    sd.Flags = 0;
     if (FAILED(factory->CreateSwapChainForHwnd(d3d_.Get(), hwnd_, &sd, nullptr, nullptr,
-                                               swap_.GetAddressOf())))
+                                              swap_.GetAddressOf())))
         return false;
+    swap1_.Reset();
+    swap_.As(&swap1_);
+    if (ComPtr<IDXGISwapChain2> s2; SUCCEEDED(swap_.As(&s2))) s2->SetMaximumFrameLatency(1);
     factory->MakeWindowAssociation(hwnd_, DXGI_MWA_NO_ALT_ENTER);
+
+    // Log the presentation path and the display mode once: this is the first
+    // thing to check when the preview rate disagrees with the capture rate.
+    {
+        DEVMODEW dm{};
+        dm.dmSize = sizeof(dm);
+        const bool haveMode = EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm) != FALSE;
+        Diag::Log("[ui] present: flip-sequential, latency=1, display=%ux%u@%uHz",
+                  haveMode ? dm.dmPelsWidth : 0, haveMode ? dm.dmPelsHeight : 0,
+                  haveMode ? dm.dmDisplayFrequency : 0);
+    }
 
     dpi_ = GetDpiForWindow(hwnd_);
     if (dpi_ == 0) dpi_ = 96;
@@ -1606,6 +1630,7 @@ void UiApp::Paint() {
         textScale_ = scale_;
     }
 
+    // Pace to the display inside Present (see below); nothing to wait for here.
     dc_->SetTarget(target_.Get());  // the pop-out preview shares this context
     dc_->BeginDraw();
     const auto paintT0 = std::chrono::steady_clock::now();
@@ -1641,6 +1666,10 @@ void UiApp::Paint() {
     DrawFocusRing();  // keyboard focus indicator (Tab navigation)
 
     HRESULT hr = dc_->EndDraw();
+    if (FAILED(hr) && !paintErrLogged_) {
+        paintErrLogged_ = true;
+        Diag::Log("[ui] EndDraw failed: 0x%08X", (unsigned)hr);
+    }
     if (hr == D2DERR_RECREATE_TARGET) {
         RECT cr{};
         GetClientRect(hwnd_, &cr);
@@ -1651,29 +1680,23 @@ void UiApp::Paint() {
     // Present with vsync only when idle. While a session is live the UI ticks at
     // the capture rate, and a vsync Present can block for a long time if the
     // window is occluded -- which would stall the message loop (and the preview).
-    // Present with vsync only when idle. While a session is live the preview is
-    // paced by the frame budget below (Present(1,0) can block for a long time if
-    // the window is occluded, which would stall the message loop).
-    swap_->Present(sessionRunning_ ? 0 : 1, 0);
+    // Present with vsync. While a session is live use Present1 + DO_NOT_WAIT: it
+    // still paces to the refresh, but a frame that cannot be shown yet is skipped
+    // instead of blocking the message loop (the Windows 11 queue-full stall).
+    if (sessionRunning_ && swap1_) {
+        DXGI_PRESENT_PARAMETERS pp{};
+        const HRESULT pr = swap1_->Present1(1, DXGI_PRESENT_DO_NOT_WAIT, &pp);
+        if (pr == (HRESULT)0x087A0001) Sleep(1);  // DXGI_STATUS_WAS_STILL_DRAWING
+    } else {
+        swap_->Present(1, 0);
+    }
     paintMs_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - paintT0)
                    .count();
 
-    // Live preview: self-schedule the next frame at the configured rate instead of
-    // waiting for WM_TIMER (which coalesces with pending paints and lands at about
-    // half the rate). A 1 ms system timer keeps the leftover sleep accurate.
+    // Live preview: self-schedule the next frame; Present paces it.
     if (sessionRunning_ && IsWindowVisible(hwnd_) && !IsIconic(hwnd_)) {
-        if (!fastTimer_) {
-            timeBeginPeriod(1);
-            fastTimer_ = true;
-        }
-        const unsigned fps = std::clamp<unsigned>(settings_.fps, 30u, 120u);
-        const double left = 1000.0 / (double)fps - paintMs_;
-        if (left > 1.0) Sleep((DWORD)(left - 0.5));
         InvalidateRect(hwnd_, nullptr, FALSE);
         if (popHwnd_) InvalidateRect(popHwnd_, nullptr, FALSE);  // keep both in step
-    } else if (fastTimer_) {
-        timeEndPeriod(1);
-        fastTimer_ = false;
     }
 }
 
@@ -1855,7 +1878,6 @@ void UiApp::DrawPreview(const D2D1_RECT_F& r) {
 void UiApp::DrawModePage(bool recordMode) {
     D2D1_RECT_F preview = PreviewRect();
     DrawPreview(preview);
-    DrawPreviewStats(preview);
 
     DrawSceneRail();
 
@@ -1865,6 +1887,7 @@ void UiApp::DrawModePage(bool recordMode) {
         DrawStreamCards();
 
     DrawTransport(recordMode ? 0 : 1);
+    DrawAudioMixer(S(320, 582, 720, 40));
 }
 
 void UiApp::DrawSceneRail() {
@@ -1924,6 +1947,11 @@ void UiApp::DrawSceneRail() {
     const UiScene& sc = scenes_[activeScene_];
     sourceRowRects_.assign(sc.sources.size(), D2D1_RECT_F{});
     for (size_t i = 0; i < sc.sources.size(); ++i) {
+        // Audio is not a source any more: the mic and desktop channels live in the
+        // mixer strip, like any desktop capture app.
+        if (sc.sources[i].type == SessionSourceType::AudioIn ||
+            sc.sources[i].type == SessionSourceType::AudioOut)
+            continue;
         if (y > 566) break;  // leave room for the cursor row + the status line
         D2D1_RECT_F row = S(x, y, w, 30);
         sourceRowRects_[i] = row;
@@ -1966,8 +1994,27 @@ void UiApp::DrawSceneRail() {
         y += 30;
     }
 
-    // One line of feedback at the bottom of the rail (the newest log line).
-    DrawActivityStrip(S(x, 600, w, 16), 1);
+    // Status lives here, not over the picture: state + timer, then the numbers.
+    {
+        std::wstring state;
+        D2D1_COLOR_F sc = WithAlpha(kTextDim, kHintAlpha);
+        if (stats_.failed) { state = L"ERROR"; sc = kRec; }
+        else if (stats_.recording) { state = L"REC " + FormatTime(stats_.recSeconds); sc = kRec; }
+        else if (stats_.streaming) { state = L"LIVE " + FormatTime(stats_.strSeconds); sc = kAccent2; }
+        else if (stats_.replayArmed) { state = L"REPLAY"; sc = kAccent; }
+        else if (previewSession_) { state = L"PREVIEW"; sc = kAccent; }
+        else state = L"IDLE";
+        Text(Format(L"%s   ·   %.0f fps   ·   view %.0f fps", state.c_str(),
+                    sessionRunning_ && stats_.elapsed > 0.1 ? stats_.captured / stats_.elapsed : 0.0,
+                    previewFps_),
+             fmtSmall_, S(x, 592, w, 14), sc);
+        Text(sessionRunning_ && stats_.width
+                 ? Format(L"%s  ·  %ux%u  ·  %.1f ms  ·  %llu dropped", Widen(stats_.backend).c_str(),
+                          stats_.width, stats_.height, paintMs_,
+                          (unsigned long long)stats_.dropped)
+                 : L"not running",
+             fmtSmall_, S(x, 606, w, 14), WithAlpha(kTextDim, kHintAlpha));
+    }
 }
 
 std::wstring UiApp::SourceTag(const UiSource& s) const {
@@ -2029,9 +2076,10 @@ bool UiApp::IsSecondaryCapture(int sourceIndex) const {
     return false;
 }
 
-std::vector<std::wstring> UiApp::SourceMenuItems() const {    return {L"Display Capture (monitor)", L"Window Capture", L"Game Capture (DXGI)",
-            L"Video Capture Device (camera, capture card)", L"Microphone",
-            L"Desktop Audio (system sound)", L"Browser Overlay"};
+std::vector<std::wstring> UiApp::SourceMenuItems() const {
+    // Audio is not a source: the mic and desktop channels live in the mixer.
+    return {L"Display Capture (monitor)", L"Window Capture", L"Game Capture (DXGI)",
+            L"Video Capture Device (camera, capture card)", L"Browser Overlay"};
 }
 
 void UiApp::BuildSourceProperties(int sourceIndex) {
@@ -2274,27 +2322,7 @@ void UiApp::AddSourceAt(int menuIndex, int choiceNumber, const std::wstring& cho
             statusText_ = L"Video source added — pick the device from the list";
             statusError_ = false;
             break;
-        case 4:  // microphone
-            if (!has(SessionSourceType::AudioIn)) {
-                s.type = SessionSourceType::AudioIn;
-                s.device = settings_.micDevice;
-                sc.sources.push_back(s);
-                openProps = (int)sc.sources.size() - 1;
-                statusText_ = L"Microphone added — pick the device from the list";
-                statusError_ = false;
-            }
-            break;
-        case 5:  // desktop audio
-            if (!has(SessionSourceType::AudioOut)) {
-                s.type = SessionSourceType::AudioOut;
-                s.device = settings_.desktopDevice;
-                sc.sources.push_back(s);
-                openProps = (int)sc.sources.size() - 1;
-                statusText_ = L"Desktop audio added — pick the output from the list";
-                statusError_ = false;
-            }
-            break;
-        case 6:  // browser overlay
+        case 4:  // browser overlay
             if (!has(SessionSourceType::Browser)) {
                 s.type = SessionSourceType::Browser;
                 sc.sources.push_back(s);
@@ -3341,6 +3369,77 @@ void UiApp::DrawSettingsPage() {
     DrawTransport(2);  // both actions stay reachable from Settings
 }
 
+void UiApp::DrawAudioMixer(const D2D1_RECT_F& r) {
+    // OBS-style mixer: one strip per channel with mute, gain and a real meter fed
+    // by post-fader, post-filter peaks from the audio thread.
+    const float chW = (r.right - r.left - Px(10)) / 2;
+    const float now = (float)GetTickCount64() / 1000.f;
+    auto channel = [&](int i, const wchar_t* name, bool* on, int* gainPct, float peak,
+                       float* hold) {
+        const float sx = r.left + i * (chW + Px(10));
+        Panel(D2D1::RectF(sx, r.top, sx + chW, r.bottom), 8, WithAlpha(kPanel, 0.55f), true);
+        // mute
+        const int idToggle = i == 0 ? ID_TOGGLE_MIC : ID_TOGGLE_DESKTOP;
+        D2D1_RECT_F mb = D2D1::RectF(sx + Px(8), r.top + Px(7), sx + Px(34), r.bottom - Px(7));
+        hits_.push_back({idToggle, mb, true});
+        Panel(mb, 5, *on ? WithAlpha(kAccent, 0.85f) : WithAlpha(kPanel2, 0.9f), true);
+        Text(*on ? L"on" : L"off", fmtSmall_, mb,
+             *on ? kWhite : WithAlpha(kTextDim, kHintAlpha), DWRITE_TEXT_ALIGNMENT_CENTER);
+        Text(name, fmtSmall_, D2D1::RectF(sx + Px(40), r.top + Px(6), sx + Px(104), r.bottom - Px(6)),
+             WithAlpha(kText, 0.9f));
+        // gain (0..200%)
+        const int idSlider = i == 0 ? ID_SLIDER_MICGAIN : ID_SLIDER_DESKGAIN;
+        Slider(idSlider,
+               D2D1::RectF(sx + Px(104), r.top + Px(6), sx + Px(250), r.bottom - Px(6)), 0, 200,
+               gainPct, L"%d%%");
+        // meter: -60..0 dBFS with a decaying peak hold
+        const float db = peak > 1e-6f ? 20.f * log10f(peak) : -60.f;
+        *hold = (std::max)(*hold - 30.f * (1.f / 60.f), db);  // ~30 dB/s decay
+        if (db > *hold) *hold = db;
+        D2D1_RECT_F mr = D2D1::RectF(sx + Px(256), r.top + Px(11), sx + chW - Px(44),
+                                     r.bottom - Px(11));
+        dc_->FillRoundedRectangle(D2D1::RoundedRect(mr, Px(4), Px(4)),
+                                  Br(WithAlpha(kBlack, 0.4f)));
+        const float t = std::clamp((db + 60.f) / 60.f, 0.f, 1.f);
+        const float th = std::clamp((*hold + 60.f) / 60.f, 0.f, 1.f);
+        if (t > 0.f) {
+            D2D1_RECT_F fill = D2D1::RectF(mr.left, mr.top, mr.left + (mr.right - mr.left) * t,
+                                           mr.bottom);
+            // green up to -12 dB, amber to -3, red above
+            const float a12 = std::clamp((12.f) / 60.f, 0.f, 1.f);
+            const float a3 = std::clamp((3.f) / 60.f, 0.f, 1.f);
+            dc_->FillRectangle(D2D1::RectF(fill.left, fill.top,
+                                           (std::min)(fill.right,
+                                                      mr.left + (mr.right - mr.left) * (1.f - a12)),
+                                           fill.bottom),
+                               Br(Hsl(0.36f, 0.65f, 0.48f)));
+            if (t > 1.f - a12) {
+                dc_->FillRectangle(
+                    D2D1::RectF(mr.left + (mr.right - mr.left) * (1.f - a12), fill.top,
+                                (std::min)(fill.right, mr.left + (mr.right - mr.left) * (1.f - a3)),
+                                fill.bottom),
+                    Br(Hsl(0.12f, 0.85f, 0.55f)));
+            }
+            if (t > 1.f - a3) {
+                dc_->FillRectangle(
+                    D2D1::RectF(mr.left + (mr.right - mr.left) * (1.f - a3), fill.top, fill.right,
+                                fill.bottom),
+                    Br(Hsl(0.99f, 0.75f, 0.55f)));
+            }
+        }
+        if (th > 0.f) {
+            const float hx = mr.left + (mr.right - mr.left) * th;
+            dc_->FillRectangle(D2D1::RectF(hx - Px(1), mr.top, hx + Px(1), mr.bottom), Br(kText));
+        }
+        Text(db <= -59.f ? L"-inf" : Format(L"%.0f", db), fmtSmall_,
+             D2D1::RectF(sx + chW - Px(40), r.top + Px(6), sx + chW - Px(6), r.bottom - Px(6)),
+             WithAlpha(kTextDim, kHintAlpha), DWRITE_TEXT_ALIGNMENT_TRAILING);
+    };
+    (void)now;
+    channel(0, L"Mic", &settings_.mic, &micGainPct_, stats_.micPeak, &micHold_);
+    channel(1, L"Desktop", &settings_.desktopAudio, &deskGainPct_, stats_.deskPeak, &deskHold_);
+}
+
 void UiApp::DrawTransport(int mode) {
     const bool rec = stats_.recording;
     const bool live = stats_.streaming;
@@ -3827,13 +3926,7 @@ void UiApp::EnsureSceneDefaults(UiScene& scene) const {
             c.dxgi = backendKeys_[selBackend_] == "dxgi";
         scene.sources.insert(scene.sources.begin(), c);
     }
-    if (!hasOut) {
-        UiSource a;
-        a.type = SessionSourceType::AudioOut;
-        a.enabled = settings_.desktopAudio;
-        a.device = settings_.desktopDevice;
-        scene.sources.push_back(a);
-    }
+
 }
 
 void UiApp::PushSceneSources() {
@@ -3927,18 +4020,13 @@ SessionConfig UiApp::BuildConfig() {
     cfg.sceneFade = settings_.sceneFade;
     cfg.preset = settings_.preset;
     // Audio sources come from the scene (devices per source).
-    cfg.audio.desktop = false;
-    cfg.audio.mic = false;
-    for (const UiSource& s : sc.sources) {
-        if (!s.enabled) continue;
-        if (s.type == SessionSourceType::AudioOut) {
-            cfg.audio.desktop = true;
-            cfg.audio.desktopDevice = s.device.empty() ? L"default" : Widen(s.device);
-        } else if (s.type == SessionSourceType::AudioIn) {
-            cfg.audio.mic = true;
-            cfg.audio.micDevice = s.device.empty() ? L"default" : Widen(s.device);
-        }
-    }
+    // Audio is global, like a mixer: the mic and desktop channels always exist and
+    // are toggled from the mixer strip, not added as scene sources.
+    cfg.audio.desktop = settings_.desktopAudio;
+    cfg.audio.mic = settings_.mic;
+    cfg.audio.desktopDevice =
+        settings_.desktopDevice.empty() ? L"default" : Widen(settings_.desktopDevice);
+    cfg.audio.micDevice = settings_.micDevice.empty() ? L"default" : Widen(settings_.micDevice);
     cfg.audio.micGain = settings_.micGain;
     cfg.audio.desktopGain = settings_.desktopGain;
     cfg.audio.gate = settings_.micGate;

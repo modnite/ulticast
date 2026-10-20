@@ -152,6 +152,8 @@ public:
         uint32_t width = 0, height = 0;
         uint64_t dxgiPointer = 0, dxgiShapes = 0;
         std::wstring desktopDevice, micDevice, webcamName;
+        // Post-fader peaks for the mixer meters (0..1 linear).
+        float deskPeak = 0.f, micPeak = 0.f;
         bool browserActive = false;
     };
 

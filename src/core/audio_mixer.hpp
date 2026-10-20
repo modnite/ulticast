@@ -66,6 +66,9 @@ public:
     bool DesktopActive() const { return desktop_ && desktop_->running.load(); }
     bool MicActive() const { return mic_ && mic_->running.load(); }
     bool AnyActive() const { return DesktopActive() || MicActive(); }
+    // Post-fader, post-filter peaks (0..1 linear) for the mixer meters.
+    float DeskPeak() const { return deskPeak_.load(); }
+    float MicPeak() const { return micPeak_.load(); }
 
     std::vector<uint8_t> MixExtradata() const;
     std::vector<uint8_t> MicExtradata() const;
@@ -88,6 +91,7 @@ private:
     std::thread pump_;
     std::atomic<bool> quit_{false};
     std::atomic<float> liveDeskGain_{1.f}, liveMicGain_{1.f};
+    std::atomic<float> deskPeak_{0.f}, micPeak_{0.f};
     std::atomic<bool> gateOn_{false};
     std::atomic<float> gateDb_{-45.f};
     float gateEnv_ = 1.f;   // current gate gain (smoothed)

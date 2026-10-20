@@ -1542,6 +1542,8 @@ Session::Stats Session::GetStats() const {    Stats st;
     st.dxgiPointer = dup_.pointerUpdates.load();
     st.dxgiShapes = dup_.shapeUpdates.load();
     st.desktopDevice = mixer_.DesktopName();
+    st.deskPeak = mixer_.DeskPeak();
+    st.micPeak = mixer_.MicPeak();
     st.micDevice = mixer_.MicName();
     st.webcamName.clear();
     for (auto& v : videos_) {

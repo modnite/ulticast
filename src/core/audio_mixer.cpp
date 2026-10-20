@@ -239,6 +239,19 @@ void AudioMixer::Pump() {
             compEnv_ = 0.f;
         }
 
+        // Metering: post-fader, post-filter peaks for the mixer UI. Cheap enough
+        // to do every block, and it is what makes the meters real rather than
+        // decorative.
+        {
+            float pd = 0.f, pm = 0.f;
+            for (int i = 0; i < F; ++i) {
+                pd = (std::max)(pd, (std::max)(fabsf(d[2 * i]), fabsf(d[2 * i + 1])));
+                pm = (std::max)(pm, (std::max)(fabsf(m[2 * i]), fabsf(m[2 * i + 1])));
+            }
+            deskPeak_.store(pd);
+            micPeak_.store(pm);
+        }
+
         // Monitoring: play the post-filter mic to the chosen output device.
         if (monitor_ && monitor_->running()) monitor_->ring.Write(m.data(), (size_t)F);
 

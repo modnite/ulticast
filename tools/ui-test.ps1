@@ -263,12 +263,12 @@ Click $hwnd 284 27
 $before = Shot $hwnd '06-record-again'
 Click $hwnd 258 491
 $open = Shot $hwnd '07-add-menu-open'
-$menu = Sample $open 150 340
-$bg = Sample $before 150 340
+$menu = Sample $open 150 560
+$bg = Sample $before 150 560
 Check 'add-source menu opens' ((Dist $menu $bg) -gt 25) "menu=$($menu.r),$($menu.g),$($menu.b)"
 Click $hwnd 600 30
 $closed = Shot $hwnd '08-add-menu-closed'
-$after = Sample $closed 150 340
+$after = Sample $closed 150 560
 Check 'clicking away closes the menu' ((Dist $after $bg) -le 12) "after=$($after.r),$($after.g),$($after.b)"
 
 # ---------------------------------------------------------------- text edit --
@@ -366,13 +366,13 @@ Start-Process notepad -WindowStyle Minimized | Out-Null
 Start-Sleep -Milliseconds 900
 $before = SettingValue 'scene0'
 Click $hwnd 258 491           # + Add
-Click $hwnd 258 278           # "Window Capture" (the long menu flips upward)
+Click $hwnd 258 562           # "Window Capture" (menu now fits below the button)
 Start-Sleep -Milliseconds 500
 $pending = SettingValue 'scene0'
 Check 'window source: nothing added before a window is chosen' ($pending -eq $before) `
       "before=$before after=$pending"
 Shot $hwnd '13-window-picker' | Out-Null
-Click $hwnd 258 244           # first window in the picker (also flipped up)
+KeyDown $hwnd 0x0D            # Enter: take the highlighted (first) window
 Start-Sleep -Milliseconds 700
 $after = SettingValue 'scene0'
 Check 'window source: choosing a window adds a WIN source' `

@@ -98,6 +98,9 @@ struct UiSettings {
     bool idlePreview = true;    // capture-only preview while not recording
     bool closeToTray = false;   // X keeps running in the tray instead of exiting
     bool sceneFade = true;      // crossfade when switching scenes
+    // Resizable layout: preview band height and the scene-rail width (design px).
+    int previewH = 300;
+    int railW = 280;
     int accent = 0;             // index into the accent table (Violet default)
     bool light = false;         // light theme instead of dark
 

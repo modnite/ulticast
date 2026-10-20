@@ -165,8 +165,14 @@ Please attach `diagnostics-*.txt` and the newest log to
   resolution pill was removed, and the presentation path switched to a non-blocking vsync present
   with a frame-latency cap (the Windows 11 queue-full stall) plus a log line recording the display
   mode — released in v0.9.11
-- Next: dockable/resizable panels, per-source filters and transitions (derived from how established
-  capture apps structure this), then on-hardware validation on the RTX 3080 rig
+- **Stage 23** resizable layout and dynamic UI testing: the preview band height and the scene-rail width
+  are **draggable splitters** (persisted to settings), the mixer and cards reflow around them, and menus
+  now **size to their longest label** instead of the anchor control (which was clipping every item).
+  The UI harness gained a **dynamic pass**: three window sizes, maximise/restore, a window move, and a
+  long-text field check — 50 checks total — released in v0.9.12
+- Next: dockable panels (true re-arrangement, not just split sizes), per-source filter chains,
+  transitions, profiles/scene collections, and hotkey-driven overlay control, then on-hardware
+  validation on the RTX 3080 rig
 
 ## The UI (Ulticast-ui.exe)
 

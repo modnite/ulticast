@@ -232,6 +232,8 @@ enum {
     ID_SCENE_BASE = 2000,
     ID_PREVIEW_WEBCAM = 3000,
     ID_PREVIEW_AREA,
+    ID_SPLIT_H,
+    ID_SPLIT_V,
     ID_ADD_SOURCE = 4000,
     ID_SRC_PROP_BASE = 4001,    // + source index: row click opens properties
     ID_SRC_TOGGLE_BASE = 4100,  // + source index: enable/disable
@@ -419,8 +421,10 @@ private:
     void Card(float x, float y, float w, float h, const std::wstring& title);
     void DrawSceneSourcesCard(float x, float y, float w);  // Settings: see/choose every source target
     // Preview inhabits the top band, full content width; the scene rail and the
-    // cards live below it.
-    D2D1_RECT_F PreviewRect() const { return S(20, 62, 1020, 300); }
+    // cards live below it. Both split positions are user-resizable and persisted.
+    D2D1_RECT_F PreviewRect() const { return S(20, 62, 1020, (float)previewBandH_); }
+    float LowerTop() const { return 62.f + (float)previewBandH_ + 14.f; }
+    float CardsLeft() const { return 20.f + (float)railW_ + 12.f; }
     // preview <-> canvas mapping for the draggable webcam PiP
     D2D1_RECT_F PreviewCanvasToDevice(const D2D1_RECT_F& pr, float cx, float cy, float cw,
                                       float ch) const;
@@ -571,6 +575,10 @@ private:
     // Keyboard focus (Tab): separate from text-field focus so a field can keep
     // its caret while the ring moves on.
     int kbdFocus_ = 0;
+    // Resizable layout: 0 = none, 1 = preview height, 2 = rail width.
+    int previewBandH_ = 300, railW_ = 280, dragSplit_ = 0;
+    float dragStartXY_ = 0;
+    int dragStartSize_ = 0;
     bool kbdNav_ = false;  // the ring shows only after the keyboard was used
     int kbdItem_ = 0;      // highlighted popup item while navigating with arrows
     // Preview pacing: tick fast while a session is live so the preview tracks the
@@ -820,6 +828,8 @@ bool UiApp::Init(HINSTANCE instance) {
     }
 
     LoadUiSettings(&settings_);
+    previewBandH_ = std::clamp(settings_.previewH, 180, 420);
+    railW_ = std::clamp(settings_.railW, 220, 420);
     ApplyTheme(settings_.accent, settings_.light);  // palette before any drawing
     if (settings_.recordPath.empty()) settings_.recordPath = DefaultRecordingPath();
     ReloadDevices();
@@ -1887,11 +1897,26 @@ void UiApp::DrawModePage(bool recordMode) {
         DrawStreamCards();
 
     DrawTransport(recordMode ? 0 : 1);
-    DrawAudioMixer(S(320, 582, 720, 40));
+    DrawAudioMixer(S(CardsLeft(), 582, 1040 - CardsLeft(), 40));
+
+    // Resize handles: the preview height (horizontal) and the scene rail width
+    // (vertical). Drag them; the positions persist.
+    {
+        D2D1_RECT_F sh = S(20, 62 + previewBandH_ - 4, 1020, 12);
+        hits_.push_back({ID_SPLIT_H, sh, true});
+        dc_->FillRoundedRectangle(
+            D2D1::RoundedRect(S(500, 62 + previewBandH_ + 1, 60, 4), Px(2), Px(2)),
+            Br(WithAlpha(kBorder, hover_ == ID_SPLIT_H ? 0.95f : 0.45f)));
+        D2D1_RECT_F sv = S(20 + railW_ - 4, LowerTop(), 12, 624 - LowerTop());
+        hits_.push_back({ID_SPLIT_V, sv, true});
+        dc_->FillRoundedRectangle(
+            D2D1::RoundedRect(S(20 + railW_ + 1, LowerTop() + 96, 4, 56), Px(2), Px(2)),
+            Br(WithAlpha(kBorder, hover_ == ID_SPLIT_V ? 0.95f : 0.45f)));
+    }
 }
 
 void UiApp::DrawSceneRail() {
-    const float x = 20, w = 280, top = 376;
+    const float x = 20, w = (float)railW_, top = LowerTop();
     SectionLabel(L"SCENES", x, top);
 
     const int n = (int)scenes_.size();
@@ -1939,7 +1964,7 @@ void UiApp::DrawSceneRail() {
     // ---- sources (the active scene's list)
     y += 30 + 18;
     SectionLabel(L"SOURCES", x, y);
-    addBtnRect_ = S(x + 196, y - 5, 84, 24);
+    addBtnRect_ = S(x + w - 84, y - 5, 84, 24);
     addMenuRect_ = S(x, y - 5, w, 24);
     Button(ID_ADD_SOURCE, addBtnRect_, L"+ Add", BtnStyle::Ghost);
     y += 26;
@@ -2729,11 +2754,13 @@ void UiApp::DrawPreviewStats(const D2D1_RECT_F& r) {
 
 void UiApp::DrawRecordCards() {
     const float rowH = 30, gap = 4, pad = 10, headH = 18;
-    const float cy = 376, ch = pad + headH + 5 * rowH + 4 * gap + pad;
+    const float cy = LowerTop(), ch = pad + headH + 5 * rowH + 4 * gap + pad;
 
     // Two wider cards instead of three cramped ones: the encoder lives in
     // Settings > Encoding (it is not something you touch while recording).
-    const float rx = 320, rw = 352, rcw = rw - 2 * pad;    Card(rx, cy, rw, ch, L"RECORDING");
+    const float x0 = CardsLeft(), avail = 1040.f - x0;
+    const float rx = x0, rw = (avail - 12.f) / 2.f, rcw = rw - 2 * pad;
+    Card(rx, cy, rw, ch, L"RECORDING");
     float y = cy + pad + headH + 4;
     D2D1_RECT_F pathR = S(rx + pad, y, rcw - 92, rowH);
     Panel(pathR, 8, kPanel, true);
@@ -2752,7 +2779,7 @@ void UiApp::DrawRecordCards() {
     y += rowH + gap;
     Button(ID_OPENFOLDER, S(rx + pad, y, rcw, rowH), L"Open Folder", BtnStyle::Ghost);
 
-    const float cx = 684, cw2 = 356, ccw = cw2 - 2 * pad;
+    const float cx = rx + rw + 12.f, cw2 = 1040.f - cx, ccw = cw2 - 2 * pad;
     Card(cx, cy, cw2, ch, L"CLIPS");
     y = cy + pad + headH + 4;
     Toggle(ID_TOGGLE_REPLAY, S(cx + pad, y, ccw, rowH), L"Replay", &settings_.replay);
@@ -2777,10 +2804,11 @@ void UiApp::DrawRecordCards() {
 
 void UiApp::DrawStreamCards() {
     const float rowH = 30, gap = 4, pad = 10, headH = 18;
-    const float cy = 376, ch = pad + headH + 6 * rowH + 5 * gap + pad;
+    const float cy = LowerTop(), ch = pad + headH + 6 * rowH + 5 * gap + pad;
 
     // Two wider cards: the stream encoder lives in Settings > Encoding.
-    const float px = 320, pw = 352, pcw = pw - 2 * pad;
+    const float x0 = CardsLeft(), avail = 1040.f - x0;
+    const float px = x0, pw = (avail - 12.f) / 2.f, pcw = pw - 2 * pad;
     Card(px, cy, pw, ch, L"PLATFORM");
     float y = cy + pad + headH + 4;
     Combo(ID_COMBO_PLATFORM, S(px + pad, y, pcw, rowH), platforms_, &selPlatform_);
@@ -2802,7 +2830,7 @@ void UiApp::DrawStreamCards() {
          WithAlpha(kTextDim, kHintAlpha));
 
     // TWITCH ACCOUNT: connect once, then the stream key keeps itself current.
-    const float tx = 684, tw = 356, tcw = tw - 2 * pad;
+    const float tx = px + pw + 12.f, tw = 1040.f - tx, tcw = tw - 2 * pad;
     Card(tx, cy, tw, ch, L"TWITCH ACCOUNT");
     y = cy + pad + headH + 4;
     {
@@ -3509,14 +3537,23 @@ void UiApp::DrawPopup() {
     if (popupScroll_ > total - shown) popupScroll_ = total - shown;
     if (popupScroll_ < 0) popupScroll_ = 0;
 
+    // Size the list to its longest label: a menu anchored to a small button must
+    // not clip every item to that button's width.
+    float listW = popup_.rect.right - popup_.rect.left;
+    for (const auto& item : popup_.items)
+        listW = (std::max)(listW, MeasureText(item, fmtBody_.Get()) + Px(30));
+    listW = (std::min)(listW, Px(kWinW - 32));
+    float listX = popup_.rect.left;
+    if (listX + listW > Px(kWinW - 12)) listX = Px(kWinW - 12) - listW;
+    if (listX < Px(12)) listX = Px(12);
+
     float listH = itemH * shown + 8;
-    D2D1_RECT_F list = D2D1::RectF(popup_.rect.left, popup_.rect.bottom + Px(4),
-                                   popup_.rect.right, popup_.rect.bottom + Px(4) + Px(listH));
+    D2D1_RECT_F list = D2D1::RectF(listX, popup_.rect.bottom + Px(4), listX + listW,
+                                   popup_.rect.bottom + Px(4) + Px(listH));
     if (list.bottom > Px(visibleH) - Px(12))
-        list = D2D1::RectF(popup_.rect.left, popup_.rect.top - Px(4) - Px(listH),
-                           popup_.rect.right, popup_.rect.top - Px(4));
-    if (list.top < Px(8))
-        list = D2D1::RectF(list.left, Px(8), list.right, Px(8) + Px(listH));
+        list = D2D1::RectF(listX, popup_.rect.top - Px(4) - Px(listH), listX + listW,
+                           popup_.rect.top - Px(4));
+    if (list.top < Px(8)) list = D2D1::RectF(list.left, Px(8), list.right, Px(8) + Px(listH));
     Panel(list, 8, kPanel2, true);
 
     for (int vi = 0; vi < shown; ++vi) {
@@ -5113,6 +5150,17 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
             }
+            if (dragSplit_) {
+                const float unit = (scale_ > 0.f ? scale_ : 1.f) * (fit_ > 0.f ? fit_ : 1.f);
+                const int delta = (int)std::lround(((dragSplit_ == 1 ? y : x) - dragStartXY_) / unit);
+                if (dragSplit_ == 1)
+                    previewBandH_ = std::clamp(dragStartSize_ + delta, 180, 420);
+                else
+                    railW_ = std::clamp(dragStartSize_ + delta, 220, 420);
+                settings_.previewH = previewBandH_;
+                settings_.railW = railW_;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
             if (dragLayer_ >= 0 && !scenes_.empty() && stats_.width && previewW_ && previewH_) {
                 D2D1_RECT_F pr = PreviewRect();
                 float cx = 0, cy = 0;
@@ -5191,6 +5239,15 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 press_ == ID_SLIDER_COMPRATIO || press_ == ID_SLIDER_STREAMBFRAMES) {
                 dragging_ = press_;
                 SetSliderFromX(press_, x);
+            }
+            if (press_ == ID_SPLIT_H) {
+                dragSplit_ = 1;
+                dragStartXY_ = y;
+                dragStartSize_ = previewBandH_;
+            } else if (press_ == ID_SPLIT_V) {
+                dragSplit_ = 2;
+                dragStartXY_ = x;
+                dragStartSize_ = railW_;
             }
             if (press_ == ID_PREVIEW_AREA) {
                 D2D1_RECT_F pr = PreviewRect();
@@ -5325,6 +5382,10 @@ LRESULT UiApp::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             float x = (float)GET_X_LPARAM(lp), y = (float)GET_Y_LPARAM(lp);
             const bool wasDraggingSlider = dragging_ != 0;
             dragging_ = 0;
+            if (dragSplit_) {
+                dragSplit_ = 0;
+                SaveUiSettings(settings_);
+            }
             if (dragLayer_ >= 0) {
                 // Persist the new position/size of the dragged layer.
                 dragLayer_ = -1;

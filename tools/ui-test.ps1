@@ -38,6 +38,8 @@ public class UlticastUiTest {
     [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr h, int x, int y, int w, int ht, bool repaint);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
@@ -516,6 +518,60 @@ $wBack = $crBack.Right - $crBack.Left
 Check 'fullscreen preview: F11 expands, Esc restores' `
       ($wFs -gt $wBefore -and $wBack -eq $wBefore) `
       "before=$wBefore fullscreen=$wFs back=$wBack"
+
+# ------------------------------------------------------------- resizing ------
+# Move, resize, maximise and restore: the UI must keep rendering and stay
+# hit-testable at every size (static single-pass checks miss this class of bug).
+
+function Restore-Window {
+    [UlticastUiTest]::MoveWindow($hwnd, 80, 60, 1072, 740, $true) | Out-Null
+    Start-Sleep -Milliseconds 900
+    Refresh-Geometry
+}
+
+foreach ($sz in @(@(920, 620, 'small'), @(1600, 980, 'wide'), @(980, 860, 'tall'))) {
+    [UlticastUiTest]::MoveWindow($hwnd, 80, 60, $sz[0], $sz[1], $true) | Out-Null
+    Start-Sleep -Milliseconds 900
+    Refresh-Geometry
+    Check ("resize " + $sz[2] + ": window is usable") ($script:clientW -gt 800 -and $script:clientH -gt 500) `
+          "client=$($script:clientW)x$($script:clientH)"
+    Click $hwnd 284 25            # Record (menu bar item, scales with the design)
+    $rs = Shot $hwnd ('24-resize-' + $sz[2])
+    $card = Sample $rs 500 400    # inside the RECORDING card
+    Check ("resize " + $sz[2] + ": page still paints") (($card.r + $card.g + $card.b) -gt 30) `
+          "rgb=$($card.r),$($card.g),$($card.b)"
+}
+Restore-Window
+
+# Maximise / restore, then move the window and click again.
+[UlticastUiTest]::ShowWindow($hwnd, 3) | Out-Null   # SW_MAXIMIZE
+Start-Sleep -Milliseconds 900
+Refresh-Geometry
+$max = Shot $hwnd '25-maximized'
+$maxCard = Sample $max 500 400
+Check 'maximize: UI still paints' (($maxCard.r + $maxCard.g + $maxCard.b) -gt 30) `
+      "rgb=$($maxCard.r),$($maxCard.g),$($maxCard.b)"
+[UlticastUiTest]::ShowWindow($hwnd, 9) | Out-Null   # SW_RESTORE
+Start-Sleep -Milliseconds 900
+Refresh-Geometry
+[UlticastUiTest]::MoveWindow($hwnd, 140, 100, 1072, 740, $true) | Out-Null
+Start-Sleep -Milliseconds 700
+Refresh-Geometry
+Click $hwnd 284 25
+$moved = Shot $hwnd '26-moved'
+$movedCard = Sample $moved 500 400
+Check 'move window: UI still paints after moving' (($movedCard.r + $movedCard.g + $movedCard.b) -gt 30) `
+      "rgb=$($movedCard.r),$($movedCard.g),$($movedCard.b)"
+Restore-Window
+
+# Long text must scroll inside the field, never truncate the value.
+Click $hwnd 120 451               # scene-name field (default split layout)
+TypeChar $hwnd 1                  # Ctrl+A
+$longName = 'AVeryLongSceneNameThatMustScrollInsideTheField'
+foreach ($ch in $longName.ToCharArray()) { TypeChar $hwnd ([int]$ch) }
+Check 'text field: long text is not truncated' ((SceneName) -eq $longName) "name=$(SceneName)"
+TypeChar $hwnd 1
+foreach ($ch in 'Game'.ToCharArray()) { TypeChar $hwnd ([int]$ch) }
 
 # ------------------------------------------------------------ tray & exit ---
 # Reported: "doesn't gracefully exit or clear from the system tray on close".

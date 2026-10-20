@@ -231,6 +231,8 @@ bool LoadUiSettings(UiSettings* s) {
         else if (key == "streamLookahead") s->streamLookahead = (val == "1");
         else if (key == "streamMultipass") s->streamMultipass = (val == "1");
         else if (key == "sceneFade") s->sceneFade = (val == "1");
+        else if (key == "previewH") s->previewH = atoi(val.c_str());
+        else if (key == "railW") s->railW = atoi(val.c_str());
         else if (key == "preset") s->preset = atoi(val.c_str());
         else if (key == "desktopAudio") s->desktopAudio = (val == "1");
         else if (key == "mic") s->mic = (val == "1");
@@ -353,6 +355,8 @@ bool SaveUiSettings(const UiSettings& s) {
     f << "streamLookahead=" << (s.streamLookahead ? 1 : 0) << "\n";
     f << "streamMultipass=" << (s.streamMultipass ? 1 : 0) << "\n";
     f << "sceneFade=" << (s.sceneFade ? 1 : 0) << "\n";
+    f << "previewH=" << s.previewH << "\n";
+    f << "railW=" << s.railW << "\n";
     f << "preset=" << s.preset << "\n";
     f << "desktopAudio=" << (s.desktopAudio ? 1 : 0) << "\n";
     f << "mic=" << (s.mic ? 1 : 0) << "\n";
